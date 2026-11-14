@@ -77,6 +77,8 @@ pub struct Msg {
     pub time: String,
     pub mine: bool,
     pub reply: Option<Reply>,
+    /// Preview URLs of the pictures it carries (pasted screenshots, image files), from [`ams_preview`].
+    pub images: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -373,20 +375,44 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
                 return None; // deleted
             }
             let (reply, text) = reply_content(raw);
+            let images = images(m, raw);
             Some(Msg {
                 id: m["clientmessageid"].as_str().or(m["id"].as_str()).unwrap_or("").into(),
                 server_id: m["id"].as_str().unwrap_or("").into(),
                 sender: m["imdisplayname"].as_str().unwrap_or("").into(),
                 sender_id: avatar_id(m["from"].as_str().unwrap_or("")),
-                text: if text.is_empty() && reply.is_none() { "[attachment]".into() } else { text },
+                text: if text.is_empty() && reply.is_none() && images.is_empty() { "[attachment]".into() } else { text },
                 time: m["composetime"].as_str().unwrap_or("").into(),
                 mine: !me.is_empty() && m["from"].as_str().unwrap_or("").ends_with(me),
                 reply,
+                images,
             })
         })
         .collect();
     msgs.sort_by(|a, b| a.time.cmp(&b.time));
     msgs
+}
+
+/// Pictures pasted into the message body, then image files' previews, as [`ams_preview`] URLs.
+fn images(m: &Value, raw: &str) -> Vec<String> {
+    let inline = raw.split("<img").skip(1).filter_map(|tag| {
+        let tag = tag.split('>').next()?;
+        tag.contains("schema.skype.com/AMSImage").then(|| tag.split_once("src=\"")?.1.split('"').next()).flatten()
+    });
+    let files: Vec<Value> = m["properties"]["files"].as_str().and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default();
+    let previews = files.iter().filter_map(|f| f["filePreview"]["previewUrl"].as_str());
+    inline.chain(previews).filter_map(ams_preview).collect()
+}
+
+/// The small preview view of a picture in Teams' media store, or `None` for any other URL:
+/// fetching it sends the Teams token, so only these hosts may get it.
+pub fn ams_preview(url: &str) -> Option<String> {
+    let (host, path) = url.strip_prefix("https://")?.split_once('/')?;
+    let id = path.strip_prefix("v1/objects/")?.split('/').next()?;
+    let host_ok = host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        && (host.ends_with(".asm.skype.com") || host.ends_with(".asyncgw.teams.microsoft.com"));
+    let id_ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    (host_ok && id_ok).then(|| format!("https://{host}/v1/objects/{id}/views/imgo"))
 }
 
 /// Split Teams' embedded reply preview from the new message; malformed HTML stays visible.
@@ -477,7 +503,7 @@ mod tests {
     fn read_marker_keeps_server_and_client_message_ids_separate() {
         let message = super::Msg {
             id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
-            text: "Hello".into(), time: String::new(), mine: false, reply: None,
+            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![],
         };
         let marker = super::read_marker(&message, 999);
         assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
@@ -628,6 +654,29 @@ mod tests {
     }
 
     #[test]
+    fn images_come_from_inline_pictures_and_file_previews_on_teams_hosts_only() {
+        let files = json!([
+            {"fileName": "a.png", "filePreview": {"previewUrl": "https://in-api.asm.skype.com/v1/objects/0-cin-d3-41c6/views/imgo"}},
+            {"fileName": "b.mov", "filePreview": {"previewUrl": ""}},
+            {"fileName": "c.gif", "filePreview": {"previewUrl": "https://evil.example/v1/objects/0-x/views/imgo"}},
+        ]).to_string();
+        let v = json!({"messages": [
+            {"messagetype": "RichText/Html", "composetime": "1", "content": r#"<div><img src="https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-sin-d2-650d/views/imgo" itemscope="" itemtype="http://schema.skype.com/AMSImage" style="width:1170px"><img src="https://x/emoji.png" itemtype="http://schema.skype.com/Emoji"></div>"#},
+            {"messagetype": "RichText/Html", "composetime": "2", "content": "<p>Github actions is down</p>", "properties": {"files": files}},
+        ]});
+        let m = parse_messages(&v, "me");
+        assert_eq!(m[0].text, "");
+        assert_eq!(m[0].images, ["https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-sin-d2-650d/views/imgo"]);
+        assert_eq!(m[1].text, "Github actions is down");
+        assert_eq!(m[1].images, ["https://in-api.asm.skype.com/v1/objects/0-cin-d3-41c6/views/imgo"]);
+        assert_eq!(ams_preview("https://in-api.asm.skype.com/v1/objects/0-a/views/imgpsh_mobile_save_anim").as_deref(), Some("https://in-api.asm.skype.com/v1/objects/0-a/views/imgo"));
+        for bad in ["http://in-api.asm.skype.com/v1/objects/0-a/views/imgo", "https://a@evil.com/x.asm.skype.com/v1/objects/0-a",
+            "https://evil.com?.asm.skype.com/v1/objects/0-a", "https://in-api.asm.skype.com/v1/objects/../x", "https://in-api.asm.skype.com/v2/objects/0-a"] {
+            assert_eq!(ams_preview(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn iso_dates() {
         assert_eq!(iso(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso(1_794_673_185_538), "2026-11-14T16:19:45.538Z");
@@ -636,7 +685,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![] };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);

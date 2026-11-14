@@ -2,6 +2,8 @@
 
 mod auth;
 mod avatars;
+#[cfg(feature = "image")]
+mod images;
 mod teams;
 
 use auth::Session;
@@ -26,7 +28,12 @@ type Messages = Result<Page, String>;
 struct State {
     screen: Screen,
     avatars: avatars::Avatars,
+    #[cfg(feature = "image")]
+    images: images::Images,
     panel_width: f32,
+    /// The picture open full-window, by preview URL; closed if it isn't in the open chat.
+    #[cfg_attr(not(feature = "image"), allow(dead_code))]
+    viewer: Option<String>,
     reply_target: Option<String>,
     reply_error: Option<String>,
     reply_highlight: Option<(String, std::time::Instant)>,
@@ -61,7 +68,10 @@ fn init() -> State {
     State {
         screen: Screen::Loading,
         avatars: Default::default(),
-        panel_width: 300.0,
+        #[cfg(feature = "image")]
+        images: Default::default(),
+        panel_width: PANEL_MAX,
+        viewer: None,
         reply_target: None,
         reply_error: None,
         reply_highlight: None,
@@ -121,6 +131,8 @@ fn sign_in(s: &mut State, interactive: bool) {
 
 fn sign_out(s: &mut State) {
     s.avatars = Default::default();
+    #[cfg(feature = "image")]
+    { s.images = Default::default(); }
     s.reply_highlight = None;
     s.reply_target = None;
     s.reply_error = None;
@@ -229,7 +241,7 @@ fn send(s: &mut State) {
     let msg_id = teams::new_msg_id();
     if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: vec![] });
     }
     s.draft.clear();
     s.send_error = None;
@@ -349,6 +361,12 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             .chain(chats.iter().flat_map(|c| c.avatar_members.iter().take(3).map(|m| m.id.clone())))
             .chain(s.messages.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flat_map(|p| p.msgs.iter().map(|m| m.sender_id.clone())));
         changed |= s.avatars.poll(session, ids, s.waker.clone().unwrap());
+        #[cfg(feature = "image")]
+        {
+            // The open picture's full size first, so it isn't queued behind the chat's previews.
+            let urls = s.viewer.iter().map(|u| images::full(u)).chain(s.messages.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flat_map(|p| p.msgs.iter().flat_map(|m| m.images.iter().cloned())));
+            changed |= s.images.poll(session, urls, s.waker.clone().unwrap());
+        }
         tx.wake_after(std::time::Duration::from_secs(60));
     }
     let revealed = reveal_reply(s, tx);
@@ -523,6 +541,89 @@ fn user_avatar(s: &State, id: &str, name: &str, size: f32) -> El {
         Some(image) => el().size(size, size).clip_rounded(size / 2.0).pixels(image.pixels()).label(name),
         None => avatar(name, size),
     }
+}
+
+/// A picture's tile in a message, as Teams lays them out side by side.
+#[cfg(feature = "image")]
+const IMAGE_TILE: (f32, f32) = (256.0, 198.0);
+
+#[cfg(feature = "image")]
+fn message_image(s: &State, url: &str) -> El {
+    let t = tok::theme(true);
+    let open = url.to_owned();
+    let tile = el().size(IMAGE_TILE.0, IMAGE_TILE.1).radius(6.0).clip_rounded(6.0).fill(t.bg).border(1.0, t.separator)
+        .role("button").focusable(true).cursor(rune::Cursor::Pointer).hover(t.hover)
+        .on_press(move |s: &mut State| s.viewer = Some(open.clone()));
+    match s.images.get(url) {
+        // Letterboxed, so a tall phone screenshot and a wide desktop one share the tile size.
+        Some(Some(image)) => tile.pixels_fit(image.pixels(), rune::SurfaceFit::Fit).label("Open image"),
+        Some(None) => tile.center().label("Image unavailable").child(text("Image unavailable").font(type_::LABEL).color(t.text_secondary)),
+        None => tile.label("Loading image"),
+    }
+}
+
+/// The open picture filling the window, as Teams shows it, with the chat's other pictures a click or arrow key away.
+#[cfg(feature = "image")]
+fn image_viewer(s: &State) -> Option<El> {
+    static BACK: rune::Icon = rune::Icon { name: "viewer-back", view: 24.0, body: r#"<path d="M20 12H5 M11 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"# };
+    static PREV: rune::Icon = rune::Icon { name: "viewer-prev", view: 24.0, body: r#"<path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"# };
+    static NEXT: rune::Icon = rune::Icon { name: "viewer-next", view: 24.0, body: r#"<path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"# };
+    let open = s.viewer.as_deref()?;
+    let page = s.messages.as_ref()?.as_ref().ok()?;
+    let all: Vec<(&Msg, &String)> = page.msgs.iter().flat_map(|m| m.images.iter().map(move |u| (m, u))).collect();
+    let i = all.iter().position(|(_, u)| *u == open)?;
+    let msg = all[i].0;
+    let prev = i.checked_sub(1).map(|j| all[j].1.clone());
+    let next = all.get(i + 1).map(|(_, u)| (*u).clone());
+    let t = tok::theme(true);
+    let icon_button = |icon: &'static rune::Icon, label: &'static str, target: Option<String>| {
+        el().size(40.0, 40.0).center().radius(20.0).role("button").label(label).focusable(true)
+            .cursor(rune::Cursor::Pointer).hover(t.hover)
+            .on_press(move |s: &mut State| s.viewer = target.clone())
+            .child(rune::icon(icon, 24.0).color(t.text))
+    };
+    let arrow = |icon, label, target: Option<String>| match target {
+        Some(_) => icon_button(icon, label, target),
+        None => el().size(40.0, 40.0),
+    };
+    let full = images::full(open);
+    // The preview stands in until the full size arrives, or if it can't.
+    let picture = match s.images.get(&full).flatten().or(s.images.get(open).flatten()) {
+        Some(image) => el().grow(1.0).shrink().min_w(0.0).h_full().pixels_fit(image.pixels(), rune::SurfaceFit::Fit).label("Image"),
+        None if s.images.get(&full).is_some() => el().grow(1.0).h_full().center()
+            .child(text("Image unavailable").font(type_::BODY).color(t.text_secondary)),
+        None => el().grow(1.0).h_full().center().child(loading_messages()),
+    };
+    let (back, keys) = (prev.clone(), next.clone());
+    Some(col().key("image-viewer").w_full().h_full().fill(t.bg).focusable(true).autofocus().label("Image viewer")
+        .modal(false, |s: &mut State| s.viewer = None)
+        .on_key(move |s: &mut State, e: &rune::KeyEvent, _| {
+            s.viewer = match e.key {
+                rune::Key::Left if back.is_some() => back.clone(),
+                rune::Key::Right if keys.is_some() => keys.clone(),
+                _ => return false,
+            };
+            true
+        })
+        .child(row().w_full().items_center().gap(12.0).px(12.0).py(8.0).fill(t.card).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+            .child(icon_button(&BACK, "Close image", None))
+            .child(col().gap(2.0)
+                .child(text(msg.sender.as_str()).font(type_::LABEL).color(t.text))
+                .child(text(message_time(&msg.time, chrono::Local::now().date_naive())).font(type_::LABEL).color(t.text_secondary))))
+        .child(row().grow(1.0).w_full().min_h(0.0).items_center().gap(12.0).padding(16.0)
+            .child(arrow(&PREV, "Previous image", prev))
+            .child(picture)
+            .child(arrow(&NEXT, "Next image", next))))
+}
+
+#[cfg(not(feature = "image"))]
+fn image_viewer(_: &State) -> Option<El> {
+    None
+}
+
+#[cfg(not(feature = "image"))]
+fn message_image(_: &State, _: &str) -> El {
+    text("[image]").font(type_::BODY).color(tok::theme(true).text_secondary)
 }
 
 fn loading_messages() -> El {
@@ -707,7 +808,9 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                                 .child(note(&format!("{}  {}", reply.sender, local_time(&reply.time, "%Y-%m-%d %I:%M %p"))).font(type_::LABEL).wrap())
                                 .child(text(reply.text.as_str()).font(type_::BODY).color(t.text).max_lines(2)))
                     }))
-                    .children((!m.text.is_empty()).then(|| text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true)));
+                    .children((!m.text.is_empty()).then(|| text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true)))
+                    .children((!m.images.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0).mt(if m.text.is_empty() { 0.0 } else { 8.0 })
+                        .children(m.images.iter().map(|url| message_image(s, url)))));
                 // Keyed by id, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
                 let line = row().key(format!("msg/{}", m.id)).arrives_whole().w_full().gap(8.0).pt(if head { 12.0 } else { 0.0 });
                 let line = if edge == Some(i) {
@@ -758,8 +861,10 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         .children(results)
 }
 
+const PANEL_MAX: f32 = 480.0;
+
 fn panel_width(start: f32, delta: f32) -> f32 {
-    (start + delta).clamp(0.0, 480.0)
+    (start + delta).clamp(0.0, PANEL_MAX)
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
@@ -782,13 +887,15 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 s.attempt.fetch_add(1, SeqCst);
                 s.screen = Screen::Login(None);
             })),
-        Screen::Main { session, chats } => main_view(s, session, chats),
+        // Over the chat, not instead of it, so closing it leaves the messages scrolled where they were.
+        Screen::Main { session, chats } => main_view(s, session, chats)
+            .children(image_viewer(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))),
     }
 }
 
 fn demo(s: &mut State) {
     let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b" };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![] };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
@@ -808,6 +915,22 @@ fn demo(s: &mut State) {
     ] }));
 }
 
+#[cfg(feature = "image")]
+const IMAGE_DEMO: &str = "https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-demo/views/imgo";
+
+#[cfg(feature = "image")]
+fn image_demo(s: &mut State) {
+    demo(s);
+    // Small enough (under 64 x 64) that rune decodes it on this thread, ready for the snapshot.
+    let (w, h) = (48u32, 32u32);
+    let px: Vec<u8> = (0..w * h).flat_map(|i| [(i % w * 5) as u8, (i / w * 7) as u8, 180, 255]).collect();
+    let image = rune::ImageCache::new(Arc::new(|| {})).rgba(w, h, px);
+    s.images.insert(IMAGE_DEMO.into(), Some(image));
+    if let Some(Ok(page)) = &mut s.messages {
+        page.msgs[2].images = vec![IMAGE_DEMO.into(), "https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-loading/views/imgo".into()];
+    }
+}
+
 fn main() {
     rune::run(AppSpec::<State> {
         scenes: &[
@@ -823,6 +946,13 @@ fn main() {
                         id: original.server_id, sender: original.sender, time: original.time, text: original.text,
                     });
                 }
+            }),
+            #[cfg(feature = "image")]
+            ("image", image_demo),
+            #[cfg(feature = "image")]
+            ("viewer", |s| {
+                image_demo(s);
+                s.viewer = Some(IMAGE_DEMO.into());
             }),
             ("teams", |s| {
                 demo(s);

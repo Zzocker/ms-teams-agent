@@ -46,7 +46,7 @@ impl Avatars {
     }
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     id.len() == 36 && id.bytes().enumerate().all(|(i, b)| {
         if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() }
     })
