@@ -52,7 +52,7 @@ Optional environment variables: `TEAMS_TENANT` (default `organizations`), `TEAMS
 Headless runs use built-in demo data and never touch the network:
 
 ```sh
-ms-teams-agent --list-scenes                 # login error code main search pick
+ms-teams-agent --list-scenes                 # login error code main loading search pick
 ms-teams-agent --snap out.png --scene main   # render a screen to PNG
 ms-teams-agent --tree tree.json --scene main # element tree: roles, labels, text, rects
 ```

@@ -377,7 +377,17 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let pane = col().grow(1.0).shrink().h_full().min_w(0.0).min_h(0.0).fill(t.bg);
     let pane = match (&s.selected, &s.messages) {
         (None, _) => pane.center().child(note(if chats.is_empty() { "No chats yet." } else { "Pick a chat." })),
-        (Some(_), None) => pane.center().child(note("Loading messages…")),
+        (Some(_), None) => {
+            static RING: rune::Icon = rune::Icon {
+                name: "message-loader",
+                view: 16.0,
+                body: r#"<circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="2" fill="none" opacity="0.2"/><path d="M8 2A6 6 0 0 1 13.258 10.89" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>"#,
+            };
+            pane.key("messages-loading").center().motion(rune::Spring::NONE)
+                .child(rune::icon(&RING, 24.0).key("message-loader")
+                    .role("progressbar").label("Loading messages")
+                    .color(t.text_secondary).looping(rune::LoopSpec::rotation(0.9)))
+        },
         (Some(_), Some(Err(e))) => pane.center().padding(32.0).child(note(e).wrap()),
         (Some(id), Some(Ok(page))) => {
             let msgs = &page.msgs;
@@ -491,6 +501,10 @@ fn main() {
             ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
             ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
             ("main", demo),
+            ("loading", |s| {
+                demo(s);
+                s.messages = None;
+            }),
             ("search", |s| {
                 demo(s);
                 s.search = TextEdit::new("char");
