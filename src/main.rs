@@ -1,20 +1,24 @@
-//! Phase 1: sign in with a device code, stay signed in across launches, show who is signed in.
+//! A Teams desktop client: device-code sign-in that lasts across launches, then your chats.
 
 mod auth;
+mod teams;
 
-use auth::User;
+use auth::Session;
 use rune::tok::{self, type_};
-use rune::{AppSpec, Cx, El, Tx, Waker, col, el, text};
+use rune::{AppSpec, Cx, El, Latest, ScrollSpec, Tx, Waker, col, el, row, text};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, mpsc};
+use teams::{Chat, Msg};
 
 enum Screen {
     Loading,
     /// Signed out, with why the last attempt failed.
     Login(Option<String>),
     Code { user_code: String, url: String },
-    Profile(User),
+    Main { session: Arc<Session>, chats: Vec<Chat> },
 }
+
+type Messages = Result<Vec<Msg>, String>;
 
 struct State {
     screen: Screen,
@@ -22,13 +26,26 @@ struct State {
     attempt: Arc<AtomicU64>,
     events: (mpsc::Sender<(u64, Screen)>, mpsc::Receiver<(u64, Screen)>),
     waker: Option<Waker>,
+    selected: Option<String>,
+    /// The selected chat's messages; `None` while they load.
+    messages: Option<Messages>,
+    loader: Latest<(String, Messages)>,
 }
 
 fn init() -> State {
-    State { screen: Screen::Loading, attempt: Arc::default(), events: mpsc::channel(), waker: None }
+    State {
+        screen: Screen::Loading,
+        attempt: Arc::default(),
+        events: mpsc::channel(),
+        waker: None,
+        selected: None,
+        messages: None,
+        loader: Latest::default(),
+    }
 }
 
-/// Signs in off the UI thread: from the stored session, else (when `interactive`) with a device code.
+/// Signs in off the UI thread: from the stored session, else (when `interactive`) with a device
+/// code; then loads the chat list.
 fn sign_in(s: &mut State, interactive: bool) {
     let attempt = s.attempt.clone();
     let mine = attempt.fetch_add(1, SeqCst) + 1;
@@ -41,21 +58,41 @@ fn sign_in(s: &mut State, interactive: bool) {
                 w();
             }
         };
-        let user = match auth::resume() {
-            Ok(None) if interactive => {
+        let session = match auth::resume() {
+            // A pressed button signs in fresh when the stored session fails, so an error can't trap the user.
+            Ok(None) | Err(_) if interactive => {
                 auth::device_login(|user_code, url| emit(Screen::Code { user_code, url }), || attempt.load(SeqCst) == mine).map(Some)
             }
             r => r,
         };
-        emit(match user {
-            Ok(Some(u)) => Screen::Profile(u),
+        emit(match session.and_then(|s| s.map(|s| teams::chats(&s).map(|chats| (s, chats))).transpose()) {
+            Ok(Some((session, chats))) => Screen::Main { session: Arc::new(session), chats },
             Ok(None) => Screen::Login(None),
             Err(e) => Screen::Login(Some(e)),
         });
     });
 }
 
+fn sign_out(s: &mut State) {
+    s.attempt.fetch_add(1, SeqCst);
+    s.loader.cancel();
+    auth::sign_out();
+    (s.selected, s.messages) = (None, None);
+    s.screen = Screen::Login(None);
+}
+
+fn open_chat(s: &mut State, id: String) {
+    let Screen::Main { session, .. } = &s.screen else { return };
+    let session = session.clone();
+    (s.selected, s.messages) = (Some(id.clone()), None);
+    s.loader.request(id, move |id| {
+        let r = teams::messages(&session, &id);
+        (id, r)
+    });
+}
+
 fn setup(s: &mut State, waker: Waker) {
+    s.loader.set_waker(waker.clone());
     s.waker = Some(waker);
     // The app has no arguments of its own; any argument is Rune's headless tooling, which gets no network.
     if std::env::args().len() == 1 {
@@ -75,6 +112,12 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         s.screen = screen;
         changed = true;
     }
+    if let Some((id, r)) = s.loader.take() {
+        if s.selected.as_ref() == Some(&id) {
+            s.messages = Some(r);
+            changed = true;
+        }
+    }
     changed
 }
 
@@ -84,6 +127,65 @@ fn button(key: &'static str, label: &'static str, primary: bool, on_press: fn(&m
         .fill(if primary { tok::accent(0, true) } else { t.control_off })
         .on_press(on_press)
         .child(text(label).font(type_::TITLE).color(t.text))
+}
+
+/// `2026-11-14T10:23:45.123Z` → `2026-11-14 10:23`.
+// shortcut: shown in UTC; convert to local time when there's a time-zone source.
+fn short_time(iso: &str) -> String {
+    iso.get(..16).unwrap_or(iso).replace('T', " ")
+}
+
+fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
+    let t = tok::theme(true);
+    let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary);
+
+    let me = col().gap(2.0).grow(1.0).min_w(0.0)
+        .child(text(session.user.name.as_str()).font(type_::TITLE).color(t.text).truncate())
+        .child(note(&session.user.email).truncate());
+    let header = row().w_full().gap(8.0).padding(12.0).child(me)
+        .child(el().key("sign-out").role("button").label("Sign out").focusable(true).px(10.0).py(6.0).radius(6.0)
+            .fill(t.control_off).hover(t.hover).on_press(sign_out)
+            .child(text("Sign out").font(type_::LABEL).color(t.text)));
+    let rows = chats.iter().map(|c| {
+        let id = c.id.clone();
+        let picked = s.selected.as_ref() == Some(&c.id);
+        el().key(format!("chat/{}", c.id)).role("button").label(c.title.as_str()).focusable(true)
+            .w_full().px(12.0).py(8.0).radius(6.0)
+            .fill(if picked { t.press } else { t.card }).hover(t.hover)
+            .on_press(move |s: &mut State| open_chat(s, id.clone()))
+            .child(col().gap(2.0).w_full()
+                .child(row().w_full().gap(8.0)
+                    .child(text(c.title.as_str()).font(type_::TITLE).color(t.text).truncate().grow(1.0).min_w(0.0))
+                    .child(note(&short_time(&c.time)).font(type_::LABEL)))
+                .child(note(&c.preview).truncate()))
+    });
+    let list = col().key("chats").w_full().gap(2.0).px(6.0).children(rows)
+        .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0);
+    let sidebar = col().w(300.0).h_full().min_h(0.0).fill(t.card).child(header).child(list);
+
+    let pane = col().grow(1.0).h_full().min_w(0.0).min_h(0.0).fill(t.bg);
+    let pane = match (&s.selected, &s.messages) {
+        (None, _) => pane.center().child(note(if chats.is_empty() { "No chats yet." } else { "Pick a chat." })),
+        (Some(_), None) => pane.center().child(note("Loading messages…")),
+        (Some(_), Some(Err(e))) => pane.center().padding(32.0).child(note(e).wrap()),
+        (Some(id), Some(Ok(msgs))) => {
+            let title = chats.iter().find(|c| &c.id == id).map_or("Chat", |c| c.title.as_str());
+            let bubbles = msgs.iter().enumerate().map(|(i, m)| {
+                col().key(format!("msg/{i}")).w_full().gap(2.0)
+                    .child(row().gap(8.0)
+                        .child(text(if m.mine { "You" } else { m.sender.as_str() }).font(type_::TITLE)
+                            .color(if m.mine { tok::accent(0, true) } else { t.text }))
+                        .child(note(&short_time(&m.time)).font(type_::LABEL)))
+                    .child(text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true))
+            });
+            pane.child(row().w_full().padding(16.0).child(text(title).font(type_::TITLE).color(t.text).truncate()))
+                .child(col().key("messages").w_full().gap(14.0).px(16.0).py(8.0)
+                    .children(bubbles)
+                    .children(msgs.is_empty().then(|| note("No messages.")))
+                    .scroll(ScrollSpec { stick_bottom: true }).grow(1.0).min_h(0.0))
+        }
+    };
+    row().w_full().h_full().fill(t.bg).child(sidebar).child(pane)
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
@@ -106,37 +208,47 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 s.attempt.fetch_add(1, SeqCst);
                 s.screen = Screen::Login(None);
             })),
-        Screen::Profile(u) => {
-            let rows = [("Email", &u.email), ("Job title", &u.job_title), ("Office", &u.office), ("User ID", &u.id)];
-            page.child(title(&u.name))
-                .children(rows.into_iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| note(&format!("{k}: {v}")).selectable(true)))
-                .child(button("sign-out", "Sign out", false, |s| {
-                    s.attempt.fetch_add(1, SeqCst);
-                    auth::sign_out();
-                    s.screen = Screen::Login(None);
-                }))
-        }
+        Screen::Main { session, chats } => main_view(s, session, chats),
     }
+}
+
+fn demo(s: &mut State) {
+    let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), preview: preview.into(), time: time.into() };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { sender: sender.into(), text: text.into(), time: time.into(), mine };
+    s.screen = Screen::Main {
+        session: Arc::new(Session {
+            user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
+            ..Session::default()
+        }),
+        chats: vec![
+            chat("a", "Charles Babbage", "The engine needs another column of gears, I think", "2026-11-14T10:31:00Z"),
+            chat("b", "Design review", "Moved to Thursday", "2026-11-14T09:02:00Z"),
+            chat("c", "Mary Somerville", "Thanks!", "2026-11-12T17:45:00Z"),
+        ],
+    };
+    s.selected = Some("a".into());
+    s.messages = Some(Ok(vec![
+        msg("Charles Babbage", "Did you get a chance to look at the notes?", "2026-11-14T10:20:00Z", false),
+        msg("Ada Lovelace", "Yes. Note G is done: it computes the Bernoulli numbers.\nI'll send it tonight.", "2026-11-14T10:24:00Z", true),
+        msg("Charles Babbage", "The engine needs another column of gears, I think", "2026-11-14T10:31:00Z", false),
+    ]));
 }
 
 fn main() {
     rune::run(AppSpec::<State> {
         scenes: &[
             ("login", |s| s.screen = Screen::Login(None)),
-            ("error", |s| s.screen = Screen::Login(Some("Couldn't reach login.microsoftonline.com.".into()))),
+            ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
             ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
-            ("profile", |s| {
-                s.screen = Screen::Profile(User {
-                    name: "Ada Lovelace".into(),
-                    email: "ada@example.com".into(),
-                    job_title: "Engineer".into(),
-                    office: "London".into(),
-                    id: "00000000-0000-0000-0000-000000000000".into(),
-                })
+            ("main", demo),
+            ("pick", |s| {
+                demo(s);
+                (s.selected, s.messages) = (None, None);
             }),
         ],
         setup: Some(setup),
         poll: Some(poll),
-        ..AppSpec::new("Teams", (420.0, 360.0), init, view)
+        min_size: Some((640.0, 400.0)),
+        ..AppSpec::new("Teams", (1000.0, 680.0), init, view)
     });
 }

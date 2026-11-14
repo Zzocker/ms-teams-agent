@@ -1,21 +1,30 @@
-//! Microsoft identity platform device-code sign-in, the stored session, and the signed-in user.
+//! Device-code sign-in with the Teams web client, the stored session, and the Teams (Skype) token
+//! its private chat service takes.
 
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
 
-// `.default` asks for the permissions already pre-consented for this client (not a named scope
-// like `User.Read`, which forces incremental consent Microsoft blocks between first-party apps —
-// AADSTS65002). `offline_access` still gets us a refresh token for the session.
-const SCOPE: &str = "https://graph.microsoft.com/.default offline_access";
+// The Teams client can't get Graph tokens (AADSTS65002); it gets tokens for Teams' own API.
+const SCOPE: &str = "https://api.spaces.skype.com/.default offline_access";
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct User {
     pub name: String,
     pub email: String,
-    pub job_title: String,
-    pub office: String,
+    /// Entra object id; the user's Teams id is `8:orgid:{id}`.
     pub id: String,
+}
+
+/// A signed-in user and what the chat service needs.
+#[derive(Clone, Debug, Default)]
+pub struct Session {
+    pub user: User,
+    /// `Authentication: skypetoken=…` for the chat service.
+    // shortcut: lasts about 24 h and isn't renewed while the app stays open; restart the app after that.
+    pub skype_token: String,
+    /// The user's region's chat service, e.g. `https://apac.ng.msg.teams.microsoft.com`.
+    pub chat_service: String,
 }
 
 /// What the token endpoint said.
@@ -45,14 +54,15 @@ pub fn parse_token(v: &Value) -> Result<Token, String> {
     }
 }
 
-fn agent() -> ureq::Agent {
-    // 4xx carries the OAuth error JSON we need to read, so it isn't an Err.
+pub(crate) fn agent() -> ureq::Agent {
+    // 4xx carries the error JSON we need to read, so it isn't an Err.
     ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into()
 }
 
 fn client_id() -> String {
-    // Azure CLI public client: pre-authorized for Microsoft Graph and allows device-code flow.
-    std::env::var("TEAMS_CLIENT_ID").unwrap_or_else(|_| "04b07795-8ddb-461a-bbee-02f9e1bf7b46".into())
+    // Microsoft's Teams desktop client: a native public client, so device code works without a
+    // secret (the web client's id fails with AADSTS7000218). TEAMS_CLIENT_ID overrides it.
+    std::env::var("TEAMS_CLIENT_ID").unwrap_or_else(|_| "1fec8e78-bce4-4aaf-ab1b-5451cc387264".into())
 }
 
 fn endpoint(name: &str) -> String {
@@ -88,30 +98,54 @@ pub fn sign_out() {
     }
 }
 
-fn me(access: &str) -> Result<User, String> {
+/// The user from the access token's claims (the token came straight from Microsoft over TLS,
+/// so it isn't verified here), then the Teams token and region for them.
+fn session(access: &str) -> Result<Session, String> {
+    let claims = access.split('.').nth(1).and_then(b64url).and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .ok_or("the access token isn't a JWT")?;
+    let c = |k: &str| claims[k].as_str().unwrap_or("").to_string();
+    let user = User {
+        name: c("name"),
+        email: [c("upn"), c("unique_name"), c("preferred_username")].into_iter().find(|s| !s.is_empty()).unwrap_or_default(),
+        id: c("oid"),
+    };
     let mut res = agent()
-        .get("https://graph.microsoft.com/v1.0/me")
+        .post("https://teams.microsoft.com/api/authsvc/v1.0/authz")
         .header("Authorization", &format!("Bearer {access}"))
-        .call()
+        .send_empty()
         .map_err(|e| e.to_string())?;
     let status = res.status();
-    let v: Value = res.body_mut().read_json().map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(format!("Graph /me: {}", v["error"]["message"].as_str().unwrap_or(status.as_str())));
+    let v: Value = res.body_mut().read_json().map_err(|e| format!("Teams authz {status}: {e}"))?;
+    match (v["tokens"]["skypeToken"].as_str(), v["regionGtms"]["chatService"].as_str()) {
+        (Some(t), Some(cs)) => Ok(Session { user, skype_token: t.into(), chat_service: cs.trim_end_matches('/').into() }),
+        _ => Err(format!("Teams authz {status}: {}", v["message"].as_str().or(v["errorCode"].as_str()).unwrap_or("no Teams token in the response"))),
     }
-    let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
-    Ok(User {
-        name: s("displayName"),
-        email: if s("mail").is_empty() { s("userPrincipalName") } else { s("mail") },
-        job_title: s("jobTitle"),
-        office: s("officeLocation"),
-        id: s("id"),
-    })
+}
+
+fn b64url(s: &str) -> Option<Vec<u8>> {
+    let (mut out, mut buf, mut bits) = (Vec::new(), 0u32, 0);
+    for c in s.bytes().take_while(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        };
+        buf = (buf << 6 | v as u32) & 0xffff;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Signs in from the stored session. `Ok(None)`: there is none, or it expired (then it's deleted);
 /// `Err`: couldn't tell (offline, misconfigured), the session is kept.
-pub fn resume() -> Result<Option<User>, String> {
+pub fn resume() -> Result<Option<Session>, String> {
     let Ok(refresh) = std::fs::read_to_string(session_file()?) else { return Ok(None) };
     let v = post(&endpoint("token"), &[
         ("grant_type", "refresh_token"),
@@ -123,7 +157,7 @@ pub fn resume() -> Result<Option<User>, String> {
         Token::Ok { access, refresh } => {
             // Refresh tokens roll: each use extends the session, so only a long absence expires it.
             save(&refresh)?;
-            me(&access).map(Some)
+            session(&access).map(Some)
         }
         _ => {
             sign_out();
@@ -134,7 +168,7 @@ pub fn resume() -> Result<Option<User>, String> {
 
 /// The device-code flow. `on_code(user_code, verification_url)` is called once the user has
 /// something to type; `live` is checked between polls so a cancelled sign-in stops and saves nothing.
-pub fn device_login(on_code: impl FnOnce(String, String), live: impl Fn() -> bool) -> Result<User, String> {
+pub fn device_login(on_code: impl FnOnce(String, String), live: impl Fn() -> bool) -> Result<Session, String> {
     let client_id = client_id();
     let v = post(&endpoint("devicecode"), &[("client_id", &client_id), ("scope", SCOPE)])?;
     let (Some(device_code), Some(user_code), Some(url)) = (v["device_code"].as_str(), v["user_code"].as_str(), v["verification_uri"].as_str())
@@ -161,7 +195,7 @@ pub fn device_login(on_code: impl FnOnce(String, String), live: impl Fn() -> boo
                     return Err("cancelled".into());
                 }
                 save(&refresh)?;
-                return me(&access);
+                return session(&access);
             }
         }
     }
@@ -187,5 +221,13 @@ mod tests {
         // Not a dead session: a misconfiguration or outage must not sign the user out.
         assert!(parse_token(&json!({"error": "invalid_client"})).is_err());
         assert!(parse_token(&json!({"access_token": "a"})).is_err());
+    }
+
+    #[test]
+    fn base64url() {
+        assert_eq!(b64url("eyJuYW1lIjoiw6kifQ").unwrap(), r#"{"name":"é"}"#.as_bytes());
+        assert_eq!(b64url("YQ==").unwrap(), b"a");
+        assert_eq!(b64url("-_8").unwrap(), [0xfb, 0xff]);
+        assert!(b64url("a.b").is_none());
     }
 }
