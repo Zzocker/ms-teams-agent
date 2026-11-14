@@ -40,7 +40,7 @@ struct State {
     selected: Option<String>,
     /// The selected chat's messages; `None` while they load.
     messages: Option<Messages>,
-    loader: Latest<(String, Messages)>,
+    loader: Latest<(String, Messages, Result<(), String>)>,
     /// A fetch of the page before the loaded ones: the chat, the link it followed, the page.
     older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
@@ -158,7 +158,8 @@ fn open_chat(s: &mut State, id: String) {
     s.reply_highlight = None;
     s.reply_target = None;
     s.reply_error = None;
-    let Screen::Main { session, .. } = &s.screen else { return };
+    let Screen::Main { session, chats } = &s.screen else { return };
+    let unread = chats.iter().any(|chat| chat.id == id && chat.unread);
     let session = session.clone();
     if s.selected.as_ref() != Some(&id) {
         // A draft belongs to the chat it was written in; it must not follow to another one.
@@ -168,7 +169,11 @@ fn open_chat(s: &mut State, id: String) {
     (s.selected, s.messages) = (Some(id.clone()), None);
     s.loader.request(id, move |id| {
         let r = teams::messages(&session, &id);
-        (id, r)
+        let read = match &r {
+            Ok(page) if unread => teams::mark_read(&session, &id, page),
+            _ => Ok(()),
+        };
+        (id, r, read)
     });
 }
 
@@ -276,8 +281,15 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         s.teams = Some(result);
         changed = true;
     }
-    if let Some((id, r)) = s.loader.take() {
+    if let Some((id, r, read)) = s.loader.take() {
         if s.selected.as_ref() == Some(&id) {
+            if r.is_ok() && read.is_ok() && let Screen::Main { chats, .. } = &mut s.screen
+                && let Some(chat) = chats.iter_mut().find(|chat| chat.id == id) {
+                chat.unread = false;
+            }
+            if let Err(error) = read {
+                s.reply_error = Some(format!("Could not save read status: {error}. Reopen the chat to retry."));
+            }
             s.messages = Some(r);
             changed = true;
         }
@@ -493,7 +505,8 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let chat_row = |c: &Chat, key: &str| {
         let id = c.id.clone();
         let picked = s.selected.as_ref() == Some(&c.id);
-        row().key(format!("{key}/{}", c.id)).role("button").label(c.title.as_str()).focusable(true)
+        let title_font = if c.unread { rune::tok::TextStyle::new(13.0, 700.0) } else { type_::BODY };
+        row().key(format!("{key}/{}", c.id)).role("button").label(if c.unread { format!("{}, unread messages", c.title) } else { c.title.clone() }).focusable(true)
             .w_full().gap(10.0).px(if s.show_teams { 30.0 } else { 10.0 }).py(8.0).radius(8.0).items_center()
             .fill(if picked { t.press } else { t.card }).hover(t.hover)
             .on_press(move |s: &mut State| {
@@ -503,9 +516,11 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             .children((!s.show_teams).then(|| avatar(&c.title, 36.0)))
             .child(col().gap(2.0).grow(1.0).min_w(0.0)
                 .child(row().w_full().gap(8.0)
-                    .child(text(c.title.as_str()).font(type_::TITLE).color(t.text).truncate().grow(1.0).min_w(0.0))
-                    .children((!c.time.is_empty()).then(|| note(&chat_time(&c.time, chrono::Local::now())).font(type_::LABEL))))
-                .children((!c.preview.is_empty()).then(|| note(&c.preview).truncate())))
+                    .child(text(c.title.as_str()).font(title_font).color(if c.unread { t.text } else { t.text_secondary }).truncate().grow(1.0).min_w(0.0))
+                    .children((!c.time.is_empty()).then(|| text(&chat_time(&c.time, chrono::Local::now())).font(if c.unread { title_font } else { type_::LABEL }).color(if c.unread { t.text } else { t.text_secondary }))))
+                .child(row().w_full().gap(8.0).items_center()
+                    .children((!c.preview.is_empty()).then(|| text(&c.preview).font(if c.unread { type_::TITLE } else { type_::BODY }).color(if c.unread { t.text } else { t.text_secondary }).truncate().grow(1.0).min_w(0.0)))
+                    .children(c.unread.then(|| el().size(8.0, 8.0).radius(4.0).fill(tok::accent(0, true))))))
     };
     let mut rows: Vec<El> = Vec::new();
     if s.show_teams {
@@ -724,7 +739,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 }
 
 fn demo(s: &mut State) {
-    let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), preview: preview.into(), time: time.into() };
+    let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), preview: preview.into(), time: time.into(), unread: id == "b" };
     let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), text: text.into(), time: time.into(), mine, reply: None };
     s.screen = Screen::Main {
         session: Arc::new(Session {
@@ -767,7 +782,7 @@ fn main() {
                 s.selected = None;
                 s.messages = None;
                 let channel = |id: &str, title: &str| Chat {
-                    id: id.into(), title: title.into(), preview: String::new(), time: String::new(),
+                    id: id.into(), title: title.into(), preview: String::new(), time: String::new(), unread: false,
                 };
                 s.teams = Some(Ok(vec![
                     teams::Team { id: "development".into(), title: "Development".into(), channels: vec![

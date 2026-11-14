@@ -10,6 +10,7 @@ pub struct Chat {
     pub preview: String,
     /// ISO 8601, UTC.
     pub time: String,
+    pub unread: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,6 +54,7 @@ fn parse_teams(v: &Value) -> Result<Vec<Team>, String> {
                     title: channel["displayName"].as_str().unwrap_or("Channel").into(),
                     preview: String::new(),
                     time: String::new(),
+                    unread: false,
                 })
             }).collect::<Result<_, String>>()?,
         })
@@ -234,6 +236,25 @@ pub fn messages(s: &Session, chat_id: &str) -> Result<Page, String> {
     Ok(page(&v, &s.user.id))
 }
 
+pub fn mark_read(s: &Session, chat_id: &str, page: &Page) -> Result<(), String> {
+    let Some(last) = page.msgs.iter().filter(|m| m.server_id.parse::<u64>().is_ok())
+        .max_by_key(|m| m.server_id.parse::<u64>().unwrap_or(0)) else {
+        return Err("No message ID available for the read marker.".into());
+    };
+    let body = read_marker(last, std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_millis());
+    let response = agent().put(&url(s, &format!("conversations/{}/properties?name=consumptionhorizon", encode(chat_id))))
+        .header("Authentication", &auth(s)).send_json(&body).map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Could not save read status: {}", response.status()));
+    }
+    Ok(())
+}
+
+fn read_marker(message: &Msg, read_at: u128) -> Value {
+    serde_json::json!({"consumptionhorizon": format!("{};{read_at};{}", message.server_id, message.id)})
+}
+
 /// The page `link` (a [`Page::older`]) points to.
 pub fn older(s: &Session, link: &str) -> Result<Page, String> {
     // The link carries our token, so only follow it to the chat service.
@@ -280,11 +301,24 @@ pub fn parse_chats(v: &Value, me: &User) -> Vec<Chat> {
                 title: title.into(),
                 preview: html_to_text(last["content"].as_str().unwrap_or("")).lines().next().unwrap_or("").into(),
                 time: last["composetime"].as_str().unwrap_or("").into(),
+                unread: chat_unread(c, &me.id),
             }
         })
         .collect();
     chats.sort_by(|a, b| b.time.cmp(&a.time));
     chats
+}
+
+fn chat_unread(chat: &Value, me: &str) -> bool {
+    let last = &chat["lastMessage"];
+    if last["from"].as_str().is_none_or(|from| from.rsplit(':').next() == Some(me)) {
+        return false;
+    }
+    let read = chat["properties"]["consumptionhorizon"].as_str()
+        .and_then(|h| h.split(';').next())
+        .and_then(|id| id.parse::<u64>().ok());
+    let latest = last["id"].as_str().and_then(|id| id.parse::<u64>().ok());
+    matches!((read, latest), (Some(read), Some(latest)) if latest > read)
 }
 
 /// Oldest first; only messages people wrote (not typing, joins, renames, calls).
@@ -379,6 +413,42 @@ fn encode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn read_marker_keeps_server_and_client_message_ids_separate() {
+        let message = super::Msg {
+            id: "client-123".into(), server_id: "101".into(), sender: "Other".into(),
+            text: "Hello".into(), time: String::new(), mine: false, reply: None,
+        };
+        let marker = super::read_marker(&message, 999);
+        assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
+        let chat = serde_json::json!({
+            "properties": marker,
+            "lastMessage": {"id": "101", "from": "8:orgid:other"}
+        });
+        assert!(!super::chat_unread(&chat, "me"));
+    }
+
+    #[test]
+    fn unread_chats_compare_server_message_ids_with_read_horizon() {
+        let mut chat = serde_json::json!({
+            "properties": {"consumptionhorizon": "100;999;50"},
+            "lastMessage": {"id": "101", "from": "8:orgid:other"}
+        });
+        assert!(super::chat_unread(&chat, "me"));
+        chat["lastMessage"]["id"] = "100".into();
+        assert!(!super::chat_unread(&chat, "me"));
+        chat["lastMessage"]["id"] = "99".into();
+        assert!(!super::chat_unread(&chat, "me"));
+        chat["lastMessage"]["id"] = "101".into();
+        chat["lastMessage"]["from"] = "8:orgid:me".into();
+        assert!(!super::chat_unread(&chat, "me"));
+        chat["lastMessage"]["from"] = "8:orgid:other".into();
+        chat["properties"]["consumptionhorizon"] = "invalid".into();
+        assert!(!super::chat_unread(&chat, "me"));
+        chat["properties"] = serde_json::Value::Null;
+        assert!(!super::chat_unread(&chat, "me"));
+    }
+
     use super::*;
     use serde_json::json;
 
