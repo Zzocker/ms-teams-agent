@@ -252,7 +252,7 @@ fn send(s: &mut State) {
     }
     if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: local });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: local, links: vec![] });
     }
     s.draft.clear();
     s.send_error = None;
@@ -707,6 +707,19 @@ fn loading_messages() -> El {
         .color(tok::theme(true).text_secondary).looping(rune::LoopSpec::rotation(0.9))
 }
 
+/// A message's text, its web links in the accent colour and opened in the browser on a click.
+fn message_text(m: &Msg) -> El {
+    let t = tok::theme(true);
+    let link = tok::accent(0, true);
+    let spans = m.links.iter().map(|(r, _)| rune::Span::new(r.start, r.end).color(link)).collect();
+    m.links.iter().fold(rune::rich(m.text.as_str(), spans), |el, (r, url)| {
+        el.link(rune::Link::new(r.clone(), url.as_str()).hover(rune::LinkPaint::new().underline(link)).help(url.as_str()))
+    })
+        // Long URLs have no spaces to wrap at.
+        .font(type_::BODY).color(t.text).wrap_anywhere().selectable(true)
+        .on_link(|_: &mut State, url: &str, tx: &mut Tx| { let _ = tx.open_url(url); })
+}
+
 fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let t = tok::theme(true);
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary);
@@ -878,7 +891,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                                 .child(note(&format!("{}  {}", reply.sender, local_time(&reply.time, "%Y-%m-%d %I:%M %p"))).font(type_::LABEL).wrap())
                                 .child(text(reply.text.as_str()).font(type_::BODY).color(t.text).max_lines(2)))
                     }))
-                    .children((!m.text.is_empty()).then(|| text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true)))
+                    .children((!m.text.is_empty()).then(|| message_text(m)))
                     .children((!m.images.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0).mt(if m.text.is_empty() { 0.0 } else { 8.0 })
                         .children(m.images.iter().map(|url| message_image(s, url)))));
                 // Keyed by id, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
@@ -967,7 +980,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 
 fn demo(s: &mut State) {
     let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b" };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![] };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![] };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
@@ -1017,6 +1030,13 @@ fn main() {
                     page.msgs[1].reply = Some(teams::Reply {
                         id: original.server_id, sender: original.sender, time: original.time, text: original.text,
                     });
+                }
+            }),
+            ("link", |s| {
+                demo(s);
+                if let Some(Ok(page)) = &mut s.messages {
+                    let (text, links) = teams::html_to_rich(r#"<p>Spec is up: <a href="https://example.com/verify?Context=650251703871&amp;X-Amz-Credential=AKIAZH53PVUYPP7M4GOK%2F20261109%2Fca-central-1%2Fses%2Faws4_request&amp;X-Amz-Signature=49758107ee3a9fab9dfe9f0ad5179b6e076d0736e4b6d9dede6f027c4f60e5c4">https://example.com/verify?Context=650251703871&amp;X-Amz-Credential=AKIAZH53PVUYPP7M4GOK%2F20261109%2Fca-central-1%2Fses%2Faws4_request&amp;X-Amz-Signature=49758107ee3a9fab9dfe9f0ad5179b6e076d0736e4b6d9dede6f027c4f60e5c4</a></p>"#);
+                    (page.msgs[0].text, page.msgs[0].links) = (text, links);
                 }
             }),
             #[cfg(feature = "image")]

@@ -2,6 +2,7 @@
 
 use crate::auth::{Session, User, agent};
 use serde_json::Value;
+use std::ops::Range;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chat {
@@ -79,6 +80,8 @@ pub struct Msg {
     pub reply: Option<Reply>,
     /// Preview URLs of the pictures it carries (pasted screenshots, image files), from [`ams_preview`].
     pub images: Vec<String>,
+    /// Web links in `text`: byte ranges and their URLs, from [`html_to_rich`].
+    pub links: Vec<(Range<usize>, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -403,7 +406,7 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
             if raw.is_empty() {
                 return None; // deleted
             }
-            let (reply, text) = reply_content(raw);
+            let (reply, (text, links)) = reply_content(raw);
             let images = images(m, raw);
             Some(Msg {
                 id: m["clientmessageid"].as_str().or(m["id"].as_str()).unwrap_or("").into(),
@@ -415,6 +418,7 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
                 mine: !me.is_empty() && m["from"].as_str().unwrap_or("").ends_with(me),
                 reply,
                 images,
+                links,
             })
         })
         .collect();
@@ -445,7 +449,7 @@ pub fn ams_preview(url: &str) -> Option<String> {
 }
 
 /// Split Teams' embedded reply preview from the new message; malformed HTML stays visible.
-fn reply_content(raw: &str) -> (Option<Reply>, String) {
+fn reply_content(raw: &str) -> (Option<Reply>, (String, Vec<(Range<usize>, String)>)) {
     let parse = || {
         let start = raw.find("<blockquote")?;
         let open_end = start + raw[start..].find('>')?;
@@ -474,33 +478,59 @@ fn reply_content(raw: &str) -> (Option<Reply>, String) {
         let text = html_to_text(&quoted[quoted.find("<p")?..]);
         let mut body = raw[..start].to_owned();
         body.push_str(&raw[end + "</blockquote>".len()..]);
-        Some((Some(Reply { id, sender, time, text }), html_to_text(&body)))
+        Some((Some(Reply { id, sender, time, text }), html_to_rich(&body)))
     };
-    parse().unwrap_or_else(|| (None, html_to_text(raw)))
+    parse().unwrap_or_else(|| (None, html_to_rich(raw)))
 }
 
 /// Teams message HTML as plain text: tags dropped, block ends as newlines, common entities decoded.
-// shortcut: no formatting, links, mentions or images; render the HTML when the message view gets rich text.
 pub fn html_to_text(html: &str) -> String {
+    html_to_rich(html).0
+}
+
+/// [`html_to_text`] plus its `http(s)` links: byte ranges of the text and where they point.
+// shortcut: no formatting or mentions; extend here when the message view gets them.
+pub fn html_to_rich(html: &str) -> (String, Vec<(Range<usize>, String)>) {
+    let decode = |s: &str| s.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
     let mut out = String::new();
+    let mut links = Vec::new();
+    let mut open: Option<(usize, String)> = None;
     let mut rest = html;
     while let Some(i) = rest.find('<') {
         // Newlines between tags are source formatting, not content; keeping them doubles every line break.
         if !(rest[..i].trim().is_empty() && rest[..i].contains('\n')) {
-            out.push_str(&rest[..i]);
+            out.push_str(&decode(&rest[..i]));
         }
         let Some(j) = rest[i..].find('>') else { break };
-        let tag = rest[i + 1..i + j].trim_start_matches('/').split([' ', '/']).next().unwrap_or("").to_ascii_lowercase();
+        let inner = &rest[i + 1..i + j];
+        let tag = inner.trim_start_matches('/').split([' ', '/']).next().unwrap_or("").to_ascii_lowercase();
         if matches!(tag.as_str(), "br" | "p" | "div" | "li" | "tr") && !out.ends_with('\n') {
             out.push('\n');
+        }
+        if tag == "a" {
+            if inner.starts_with('/') {
+                if let Some((start, href)) = open.take().filter(|(start, _)| out.len() > *start) {
+                    links.push((start..out.len(), href));
+                }
+            } else {
+                // Only web links: the URL goes to the system's opener on a click.
+                open = inner.split_once("href=\"").and_then(|(_, v)| v.split('"').next()).map(decode)
+                    .filter(|h| h.starts_with("https://") || h.starts_with("http://"))
+                    .map(|h| (out.len(), h));
+            }
         }
         rest = &rest[i + j + 1..];
     }
     if !rest.contains('<') {
-        out.push_str(rest);
+        out.push_str(&decode(rest));
     }
-    let out = out.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
-    out.trim().to_string()
+    let lead = out.len() - out.trim_start().len();
+    let text = out.trim().to_string();
+    let links = links.into_iter()
+        .map(|(r, h)| (r.start.saturating_sub(lead).min(text.len())..r.end.saturating_sub(lead).min(text.len()), h))
+        .filter(|(r, _)| !r.is_empty())
+        .collect();
+    (text, links)
 }
 
 /// A path segment, percent-encoded as JavaScript's `encodeURIComponent` does.
@@ -532,7 +562,7 @@ mod tests {
     fn read_marker_keeps_server_and_client_message_ids_separate() {
         let message = super::Msg {
             id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
-            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![],
+            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![],
         };
         let marker = super::read_marker(&message, 999);
         assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
@@ -655,9 +685,9 @@ mod tests {
         assert_eq!(reply.time, iso(1600457867820));
         assert_eq!(reply.text, "Original <message>\nSecond line");
         let only_quote = raw.replace("<p>My reply</p>", "");
-        assert_eq!(reply_content(&only_quote).1, "");
+        assert_eq!(reply_content(&only_quote).1.0, "");
         for plain in ["<p>Normal message</p>", "<blockquote>Ordinary quote</blockquote>", "<blockquote itemtype='http://schema.skype.com/Reply'>Broken"] {
-            assert_eq!(reply_content(plain), (None, html_to_text(plain)));
+            assert_eq!(reply_content(plain), (None, html_to_rich(plain)));
         }
         let missing_time = raw.replace("itemid=\"1600457867820\"", "");
         assert_eq!(reply_content(&missing_time).0.unwrap().time, "");
@@ -724,7 +754,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![] };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![] };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);
@@ -741,6 +771,17 @@ mod tests {
         assert_eq!(text_to_html(typed), "a &lt;b&gt; &amp; c<br>d &amp;lt;");
         assert_eq!(html_to_text(&text_to_html(typed)), typed);
         assert_eq!(encode("19:a_b@unq.gbl.spaces"), "19%3Aa_b%40unq.gbl.spaces");
+    }
+
+    #[test]
+    fn links_keep_their_text_range_and_only_web_urls() {
+        // A real Teams link: the href's entities decode, and the range covers the shown URL.
+        let raw = r#"<p>see <a href="https://x.example/?a=1&amp;b=2" itemtype="http://schema.skype.com/HyperLink" title="t">https://x.example/?a=1&amp;b=2</a> &amp; <a href="javascript:alert(1)">js</a></p>"#;
+        let (text, links) = super::html_to_rich(raw);
+        assert_eq!(text, "see https://x.example/?a=1&b=2 & js");
+        assert_eq!(links.len(), 1);
+        assert_eq!(&text[links[0].0.clone()], "https://x.example/?a=1&b=2");
+        assert_eq!(links[0].1, "https://x.example/?a=1&b=2");
     }
 }
 
