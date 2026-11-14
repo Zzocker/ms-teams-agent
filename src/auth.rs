@@ -30,6 +30,8 @@ pub struct Session {
     pub access: String,
     /// The user's region's middle tier, e.g. `https://teams.microsoft.com/api/mt/apac`.
     pub middle_tier: String,
+    /// The user's region's media store (pictures), e.g. `https://in-prod.asyncgw.teams.microsoft.com`.
+    pub media: String,
 }
 
 /// What the token endpoint said.
@@ -130,6 +132,7 @@ fn session(access: &str) -> Result<Session, String> {
             chat_service: cs.trim_end_matches('/').into(),
             access: access.into(),
             middle_tier: v["regionGtms"]["middleTier"].as_str().unwrap_or("").trim_end_matches('/').into(),
+            media: v["regionGtms"]["amsV2"].as_str().or(v["regionGtms"]["ams"].as_str()).unwrap_or("").trim_end_matches('/').into(),
         }),
         _ => Err(format!("Teams authz {status}: {}", v["message"].as_str().or(v["errorCode"].as_str()).unwrap_or("no Teams token in the response"))),
     }

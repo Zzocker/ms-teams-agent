@@ -114,11 +114,32 @@ fn get(s: &Session, path: &str) -> Result<Value, String> {
     answer(agent().get(&url(s, path)).header("Authentication", &auth(s)).call())
 }
 
-/// Sends `text` to a chat as the signed-in user.
+/// The media store derives the client platform from this and rejects requests it can't parse.
+const MEDIA_USER_AGENT: &str = "Teams/24295.605.3225.8804/49";
+
+/// Stores a pasted PNG in the media store, readable by `chat_id`'s members, and returns its
+/// [`ams_preview`] URL for the message to show.
+pub fn upload_image(s: &Session, chat_id: &str, png: &[u8]) -> Result<String, String> {
+    let media = &s.media;
+    if media.is_empty() { return Err("no media store for this account".into()); }
+    let token = format!("skype_token {}", s.skype_token);
+    let body = serde_json::json!({"type": "pish/image", "permissions": {chat_id: ["read"]}});
+    let mut res = agent().post(&format!("{media}/v1/objects/")).header("Authorization", &token).header("User-Agent", MEDIA_USER_AGENT)
+        .send_json(&body).map_err(|e| e.to_string())?;
+    let status = res.status();
+    let v: Value = res.body_mut().read_json().map_err(|e| format!("media store {status}: {e}"))?;
+    let id = v["id"].as_str().filter(|_| status.is_success()).ok_or(format!("media store {status}"))?;
+    let res = agent().put(&format!("{media}/v1/objects/{}/content/imgpsh", encode(id))).header("Authorization", &token)
+        .header("User-Agent", MEDIA_USER_AGENT).header("Content-Type", "application/octet-stream").send(png).map_err(|e| e.to_string())?;
+    if !res.status().is_success() { return Err(format!("image upload {}", res.status())); }
+    ams_preview(&format!("{media}/v1/objects/{id}/views/imgo")).ok_or("unexpected media store address".into())
+}
+
+/// Sends `text` and pictures (from [`upload_image`], with their pixel sizes) to a chat as the signed-in user.
 /// `id` is from [`new_msg_id`].
-pub fn send(s: &Session, chat_id: &str, id: &str, text: &str) -> Result<(), String> {
+pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String, (u32, u32))]) -> Result<(), String> {
     let body = serde_json::json!({
-        "content": text_to_html(text),
+        "content": message_html(text, images),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "clientmessageid": id,
@@ -169,6 +190,14 @@ pub fn merge(old: Page, fresh: Page) -> Page {
 }
 
 /// Plain text as the HTML a Teams message carries; what [`html_to_text`] undoes.
+/// A message's HTML: the text, then each picture as Teams sends a pasted one.
+fn message_html(text: &str, images: &[(String, (u32, u32))]) -> String {
+    images.iter().fold(text_to_html(text), |mut html, (url, (w, h))| {
+        html.push_str(&format!(r#"<div><img src="{url}" itemscope="" itemtype="http://schema.skype.com/AMSImage" style="width:{w}px; height:{h}px"></div>"#));
+        html
+    })
+}
+
 pub fn text_to_html(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\n', "<br>")
 }
@@ -677,6 +706,16 @@ mod tests {
     }
 
     #[test]
+    fn sent_pictures_parse_back_as_the_same_pictures() {
+        let url = "https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-sin-d2-ab12/views/imgo".to_owned();
+        let html = message_html("look <here>", &[(url.clone(), (1170, 2532))]);
+        let m = parse_messages(&json!({"messages": [{"messagetype": "RichText/Html", "content": html, "composetime": "1"}]}), "me");
+        assert_eq!(m[0].text, "look <here>");
+        assert_eq!(m[0].images, [url]);
+        assert_eq!(message_html("", &[]), "");
+    }
+
+    #[test]
     fn iso_dates() {
         assert_eq!(iso(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso(1_794_673_185_538), "2026-11-14T16:19:45.538Z");
@@ -704,3 +743,4 @@ mod tests {
         assert_eq!(encode("19:a_b@unq.gbl.spaces"), "19%3Aa_b%40unq.gbl.spaces");
     }
 }
+

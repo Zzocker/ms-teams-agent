@@ -54,8 +54,11 @@ struct State {
     older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
     draft: TextEdit,
-    /// A send in flight: the chat, the message's id, then its reloaded messages, or the error and the unsent text.
-    sender: Latest<(String, String, Result<Messages, (String, String)>)>,
+    /// Pictures pasted into the draft, with their decoded thumbnails; sent with it.
+    pasted: Vec<(rune::ClipboardImage, rune::Image)>,
+    /// A send in flight: the chat, the message's id, then its reloaded messages and the pictures'
+    /// URLs, or the error and the unsent text and pictures.
+    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, String, Vec<(rune::ClipboardImage, rune::Image)>)>)>,
     send_error: Option<String>,
     /// Filters the chat list by name.
     search: TextEdit,
@@ -88,6 +91,7 @@ fn init() -> State {
         loader: Latest::default(),
         older_loader: Latest::default(),
         draft: TextEdit::new(""),
+        pasted: Vec::new(),
         sender: Latest::default(),
         send_error: None,
         search: TextEdit::new(""),
@@ -233,25 +237,50 @@ fn send(s: &mut State) {
     let (Screen::Main { session, .. }, Some(id)) = (&s.screen, &s.selected) else { return };
     let text = s.draft.text.trim().to_string();
     // One send at a time: `Latest` would drop the first one's answer.
-    if text.is_empty() || s.sender.is_pending() {
+    if (text.is_empty() && s.pasted.is_empty()) || s.sender.is_pending() {
         return;
     }
     let session = session.clone();
     let id = id.clone();
     let msg_id = teams::new_msg_id();
+    let pasted = std::mem::take(&mut s.pasted);
+    // The pasted pictures show at once under local keys, until their uploads have URLs.
+    let local: Vec<String> = (0..pasted.len()).map(|i| local_image(&msg_id, i)).collect();
+    #[cfg(feature = "image")]
+    for (key, (_, image)) in local.iter().zip(&pasted) {
+        s.images.insert(key.clone(), Some(image.clone()));
+    }
     if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: vec![] });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: local });
     }
     s.draft.clear();
     s.send_error = None;
-    s.sender.request((id, msg_id, text), move |(id, msg_id, text)| {
-        let r = match teams::send(&session, &id, &msg_id, &text) {
-            Ok(()) => Ok(teams::messages(&session, &id)),
-            Err(e) => Err((e, text)),
+    s.sender.request((id, msg_id, text, pasted), move |(id, msg_id, text, pasted)| {
+        let sent = (|| {
+            let urls = pasted.iter().map(|(png, _)| teams::upload_image(&session, &id, png.png())).collect::<Result<Vec<_>, _>>()?;
+            let sized: Vec<_> = urls.iter().cloned().zip(pasted.iter().map(|(png, _)| png.size())).collect();
+            teams::send(&session, &id, &msg_id, &text, &sized).map(|()| urls)
+        })();
+        let r = match sent {
+            Ok(urls) => Ok((teams::messages(&session, &id), urls)),
+            Err(e) => Err((e, text, pasted)),
         };
         (id, msg_id, r)
     });
+}
+
+/// The key a sent picture shows under before its upload has a URL.
+fn local_image(msg_id: &str, i: usize) -> String {
+    format!("local:{msg_id}:{i}")
+}
+
+/// Attach a pasted picture to the draft, decoding its thumbnail off the UI thread.
+#[cfg(feature = "image")]
+fn paste_image(s: &mut State, png: &rune::ClipboardImage) {
+    let Some(waker) = s.waker.clone() else { return };
+    let image = rune::ImageCache::new(waker).load(png.png().to_vec());
+    s.pasted.push((png.clone(), image));
 }
 
 fn setup(s: &mut State, waker: Waker) {
@@ -333,6 +362,18 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     }
     if let Some((id, msg_id, r)) = s.sender.take() {
         let here = s.selected.as_ref() == Some(&id);
+        let r = r.map(|(fresh, urls)| {
+            // The server's copy names the uploads; show them from the pasted pixels, not a download.
+            #[cfg(feature = "image")]
+            for (i, url) in urls.into_iter().enumerate() {
+                if let Some(image) = s.images.get(&local_image(&msg_id, i)).flatten().cloned() {
+                    s.images.insert(url, Some(image));
+                }
+            }
+            #[cfg(not(feature = "image"))]
+            let _ = urls;
+            fresh
+        });
         match r {
             Ok(Ok(fresh)) if here => {
                 s.messages = Some(Ok(match s.messages.take() {
@@ -342,7 +383,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             }
             Ok(fresh) if here => s.messages = Some(fresh),
             Ok(_) => {}
-            Err((e, text)) => {
+            Err((e, text, pasted)) => {
                 if let (true, Some(Ok(page))) = (here, &mut s.messages) {
                     page.msgs.retain(|m| m.id != msg_id);
                 }
@@ -350,6 +391,9 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                 // Give the text back, unless the user moved on to another chat or draft.
                 if here && s.draft.text.is_empty() {
                     s.draft.replace_text(text);
+                }
+                if here && s.pasted.is_empty() {
+                    s.pasted = pasted;
                 }
             }
         }
@@ -626,6 +670,32 @@ fn message_image(_: &State, _: &str) -> El {
     text("[image]").font(type_::BODY).color(tok::theme(true).text_secondary)
 }
 
+/// A picture waiting in the draft, with a button to take it out.
+fn pasted_image(image: &rune::Image, i: usize) -> El {
+    static CLOSE: rune::Icon = rune::Icon { name: "pasted-remove", view: 16.0, body: r#"<path d="M4 4l8 8 M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"# };
+    let t = tok::theme(true);
+    col().key(format!("pasted/{i}")).size(150.0, 100.0).radius(6.0).clip_rounded(6.0).fill(t.bg).border(1.0, t.separator)
+        .child(el().w_full().h_full().pixels_fit(image.pixels(), rune::SurfaceFit::Fit).label("Pasted image"))
+        .child(el().pin(None, Some(4.0), Some(4.0), None).size(22.0, 22.0).center().radius(11.0).fill(t.card)
+            .role("button").label("Remove image").focusable(true).cursor(rune::Cursor::Pointer).hover(t.hover)
+            .on_press(move |s: &mut State| { if i < s.pasted.len() { s.pasted.remove(i); } })
+            .child(rune::icon(&CLOSE, 12.0).color(t.text)))
+}
+
+/// A picture pasted into the message box is attached to the draft; text pastes as usual.
+#[cfg(feature = "image")]
+fn draft_paste(input: El) -> El {
+    input.on_input_paste(|s: &mut State, content: &rune::ClipboardContent, _| match content.image() {
+        Some(png) => { paste_image(s, png); true }
+        None => false,
+    })
+}
+
+#[cfg(not(feature = "image"))]
+fn draft_paste(input: El) -> El {
+    input
+}
+
 fn loading_messages() -> El {
     static RING: rune::Icon = rune::Icon {
         name: "message-loader",
@@ -847,12 +917,14 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .children(s.reply_error.as_deref().map(|e| note(e).wrap()))
                     .children(s.send_error.as_deref().map(|e| note(e).wrap()))
                     .child(row().w_full().gap(8.0).items_end()
-                        .child(col().grow(1.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
-                            .child(auto_grow(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
+                        .child(col().grow(1.0).shrink().min_w(0.0).gap(8.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
+                            .children((!s.pasted.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0)
+                                .children(s.pasted.iter().enumerate().map(|(i, (_, image))| pasted_image(image, i)))))
+                            .child(auto_grow(draft_paste(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
                                 .placeholder("Type a message", t.text_secondary)
                                 .caret(t.text, tok::accent(0, true).alpha(0.3))
                                 .on_edit(|s: &mut State| &mut s.draft)
-                                .on_submit(|s: &mut State, _| send(s)), 1, 6)))
+                                .on_submit(|s: &mut State, _| send(s))), 1, 6)))
                         .child(button("send", "Send", true, send)))))
         }
     };
