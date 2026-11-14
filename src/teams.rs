@@ -64,10 +64,20 @@ pub struct Msg {
     /// The client message id the sender gave it (the server's id if none), so a message
     /// shown as it's sent keeps its identity when the server's copy replaces it.
     pub id: String,
+    pub server_id: String,
     pub sender: String,
     pub text: String,
     pub time: String,
     pub mine: bool,
+    pub reply: Option<Reply>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reply {
+    pub id: String,
+    pub sender: String,
+    pub time: String,
+    pub text: String,
 }
 
 fn url(s: &Session, path: &str) -> String {
@@ -287,18 +297,55 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
             if raw.is_empty() {
                 return None; // deleted
             }
-            let text = html_to_text(raw);
+            let (reply, text) = reply_content(raw);
             Some(Msg {
                 id: m["clientmessageid"].as_str().or(m["id"].as_str()).unwrap_or("").into(),
+                server_id: m["id"].as_str().unwrap_or("").into(),
                 sender: m["imdisplayname"].as_str().unwrap_or("").into(),
-                text: if text.is_empty() { "[attachment]".into() } else { text },
+                text: if text.is_empty() && reply.is_none() { "[attachment]".into() } else { text },
                 time: m["composetime"].as_str().unwrap_or("").into(),
                 mine: !me.is_empty() && m["from"].as_str().unwrap_or("").ends_with(me),
+                reply,
             })
         })
         .collect();
     msgs.sort_by(|a, b| a.time.cmp(&b.time));
     msgs
+}
+
+/// Split Teams' embedded reply preview from the new message; malformed HTML stays visible.
+fn reply_content(raw: &str) -> (Option<Reply>, String) {
+    let parse = || {
+        let start = raw.find("<blockquote")?;
+        let open_end = start + raw[start..].find('>')?;
+        if !raw[start..open_end].contains("schema.skype.com/Reply") { return None; }
+        let end = open_end + raw[open_end..].find("</blockquote>")?;
+        let id = raw[start..open_end].split_once("itemid=").and_then(|(_, tail)| {
+            let quote = tail.chars().next()?;
+            matches!(quote, '\'' | '"').then(|| tail[1..].split(quote).next().unwrap_or("").to_owned())
+        }).unwrap_or_default();
+        let quoted = &raw[open_end + 1..end];
+        // shortcut: nested reply previews stay plain text; extend parsing if Teams sends them.
+        if quoted.contains("<blockquote") { return None; }
+        let element = |tag: &str| -> Option<(&str, &str)> {
+            let start = quoted.find(&format!("<{tag}"))?;
+            let open_end = start + quoted[start..].find('>')?;
+            let end = open_end + quoted[open_end..].find(&format!("</{tag}>"))?;
+            Some((&quoted[start..open_end], &quoted[open_end + 1..end]))
+        };
+        let sender = element("strong").map(|(_, body)| html_to_text(body)).unwrap_or_default();
+        let time = element("span").and_then(|(tag, _)| {
+            let tail = tag.split_once("itemid=")?.1;
+            let quote = tail.chars().next()?;
+            if !matches!(quote, '\'' | '"') { return None; }
+            tail[1..].split(quote).next()?.parse::<i64>().ok().filter(|ms| *ms >= 0).map(iso)
+        }).unwrap_or_default();
+        let text = html_to_text(&quoted[quoted.find("<p")?..]);
+        let mut body = raw[..start].to_owned();
+        body.push_str(&raw[end + "</blockquote>".len()..]);
+        Some((Some(Reply { id, sender, time, text }), html_to_text(&body)))
+    };
+    parse().unwrap_or_else(|| (None, html_to_text(raw)))
 }
 
 /// Teams message HTML as plain text: tags dropped, block ends as newlines, common entities decoded.
@@ -393,6 +440,30 @@ mod tests {
     }
 
     #[test]
+    fn quoted_reply_keeps_preview_separate_from_body() {
+        let raw = r#"<div><blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1600457867820"><strong itemprop="mri">Bob &amp; Alice</strong><span itemprop="time" itemid="1600457867820"></span><p itemprop="preview">Original &lt;message&gt;</p><p>Second line</p></blockquote><p>My reply</p></div>"#;
+        let v = json!({"messages": [{"messagetype": "RichText/Html", "content": raw}]});
+        let msgs = parse_messages(&v, "me");
+        assert_eq!(msgs[0].text, "My reply");
+        let reply = msgs[0].reply.as_ref().unwrap();
+        assert_eq!(reply.id, "1600457867820");
+        assert_eq!(reply.sender, "Bob & Alice");
+        assert_eq!(reply.time, iso(1600457867820));
+        assert_eq!(reply.text, "Original <message>\nSecond line");
+        let only_quote = raw.replace("<p>My reply</p>", "");
+        assert_eq!(reply_content(&only_quote).1, "");
+        for plain in ["<p>Normal message</p>", "<blockquote>Ordinary quote</blockquote>", "<blockquote itemtype='http://schema.skype.com/Reply'>Broken"] {
+            assert_eq!(reply_content(plain), (None, html_to_text(plain)));
+        }
+        let missing_time = raw.replace("itemid=\"1600457867820\"", "");
+        assert_eq!(reply_content(&missing_time).0.unwrap().time, "");
+        let ids = json!({"messages": [{"id": "server-id", "clientmessageid": "client-id", "messagetype": "Text", "content": "Sent"}]});
+        let msgs = parse_messages(&ids, "me");
+        assert_eq!(msgs[0].id, "client-id");
+        assert_eq!(msgs[0].server_id, "server-id");
+    }
+
+    #[test]
     fn messages_keep_only_text_oldest_first() {
         let v = json!({"messages": [
             {"messagetype": "RichText/Html", "content": "<div>two</div>", "imdisplayname": "Me", "from": format!("https://x/contacts/{ME}"), "composetime": "2"},
@@ -414,7 +485,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), sender: String::new(), text: id.into(), time: time.into(), mine: false };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), text: id.into(), time: time.into(), mine: false, reply: None };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);

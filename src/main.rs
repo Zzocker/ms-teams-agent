@@ -24,6 +24,11 @@ type Messages = Result<Page, String>;
 
 struct State {
     screen: Screen,
+    panel_width: f32,
+    reply_target: Option<String>,
+    reply_error: Option<String>,
+    reply_highlight: Option<(String, std::time::Instant)>,
+    reply_highlight_on: bool,
     show_teams: bool,
     teams: Option<Result<Vec<teams::Team>, String>>,
     teams_loader: Latest<Result<Vec<teams::Team>, String>>,
@@ -53,6 +58,11 @@ struct State {
 fn init() -> State {
     State {
         screen: Screen::Loading,
+        panel_width: 300.0,
+        reply_target: None,
+        reply_error: None,
+        reply_highlight: None,
+        reply_highlight_on: false,
         show_teams: false,
         teams: None,
         teams_loader: Latest::default(),
@@ -107,6 +117,9 @@ fn sign_in(s: &mut State, interactive: bool) {
 }
 
 fn sign_out(s: &mut State) {
+    s.reply_highlight = None;
+    s.reply_target = None;
+    s.reply_error = None;
     s.attempt.fetch_add(1, SeqCst);
     s.teams_loader.cancel();
     s.teams = None;
@@ -123,6 +136,9 @@ fn sign_out(s: &mut State) {
 }
 
 fn navigate(s: &mut State, teams: bool) {
+    s.reply_highlight = None;
+    s.reply_target = None;
+    s.reply_error = None;
     s.show_teams = teams;
     s.search.clear();
     s.loader.cancel();
@@ -139,6 +155,9 @@ fn navigate(s: &mut State, teams: bool) {
 }
 
 fn open_chat(s: &mut State, id: String) {
+    s.reply_highlight = None;
+    s.reply_target = None;
+    s.reply_error = None;
     let Screen::Main { session, .. } = &s.screen else { return };
     let session = session.clone();
     if s.selected.as_ref() != Some(&id) {
@@ -151,6 +170,27 @@ fn open_chat(s: &mut State, id: String) {
         let r = teams::messages(&session, &id);
         (id, r)
     });
+}
+
+/// Reveal the reply target, following older pages until it is found or history runs out.
+fn reveal_reply(s: &mut State, tx: &mut Tx) -> bool {
+    let Some(target) = s.reply_target.as_deref() else { return false };
+    let Some(Ok(page)) = &s.messages else { return false };
+    if !target.is_empty() && let Some(msg) = page.msgs.iter().find(|m| m.server_id == target || m.id == target) {
+        tx.scroll_center_in("messages", format!("msg/{}", msg.id));
+        s.reply_highlight = Some((msg.id.clone(), std::time::Instant::now()));
+        s.reply_highlight_on = true;
+        tx.wake_after(std::time::Duration::from_millis(150));
+        s.reply_target = None;
+        return true;
+    }
+    if target.is_empty() || page.older.is_none() {
+        s.reply_target = None;
+        s.reply_error = Some("The quoted message is unavailable or was deleted.".into());
+        return true;
+    }
+    load_older(s);
+    false
 }
 
 /// Fetches the page before the loaded messages, when scrolling reaches the top of them.
@@ -180,7 +220,7 @@ fn send(s: &mut State) {
     let msg_id = teams::new_msg_id();
     if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), sender: session.user.name.clone(), text: text.clone(), time: teams::now(), mine: true });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None });
     }
     s.draft.clear();
     s.send_error = None;
@@ -205,8 +245,23 @@ fn setup(s: &mut State, waker: Waker) {
     }
 }
 
+fn reply_blink(elapsed: f32) -> Option<bool> {
+    (elapsed < 1.8).then(|| (elapsed / 0.3) as u32 % 2 == 0)
+}
+
 fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
+    if let Some((_, started)) = &s.reply_highlight {
+        if let Some(on) = reply_blink(started.elapsed().as_secs_f32()) {
+            changed = s.reply_highlight_on != on;
+            s.reply_highlight_on = on;
+            tx.wake_after(std::time::Duration::from_millis(150));
+        } else {
+            s.reply_highlight = None;
+            s.reply_highlight_on = false;
+            changed = true;
+        }
+    }
     while let Ok((attempt, screen)) = s.events.1.try_recv() {
         if attempt != s.attempt.load(SeqCst) {
             continue;
@@ -228,6 +283,13 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
     }
     if let Some((id, link, r)) = s.older_loader.take() {
+        if s.selected.as_ref() == Some(&id) && s.reply_target.is_some() {
+            if let Err(e) = &r {
+                s.reply_target = None;
+                s.reply_error = Some(format!("Could not load the quoted message: {e}"));
+                changed = true;
+            }
+        }
         // Only onto the page it was asked for: a reload meanwhile has its own cursor.
         if let (true, Some(Ok(page)), Ok(old)) = (s.selected.as_ref() == Some(&id), s.messages.as_mut(), r) {
             if page.older.as_deref() == Some(&link) {
@@ -236,7 +298,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                     tx.keep_on_screen(format!("msg/{}", first.id));
                 }
                 page.msgs.splice(0..0, old.msgs);
-                page.older = old.older;
+                page.older = old.older.filter(|next| next != &link);
                 changed = true;
             }
         }
@@ -265,7 +327,8 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
-    changed
+    let revealed = reveal_reply(s, tx);
+    changed || revealed
 }
 
 /// A scroll bar's thumb, where it's drawn, and where its viewport was last scrolled to, for dragging.
@@ -454,10 +517,28 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 .on_edit(|s: &mut State| &mut s.search)));
     let list = with_bar("chats", col().w_full().gap(2.0).padding(6.0).children(rows)
         .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0), &s.chat_bar);
-    let sidebar = col().w(300.0).h_full().min_h(0.0).fill(t.card).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
+    let sidebar = col().key("sidebar").w(s.panel_width).min_w(0.0).h_full().min_h(0.0)
+        .motion(rune::Spring::NONE).clip_rounded(0.0).fill(t.card)
         .child(header)
         .child(text(if s.show_teams { "Teams" } else { "Chat" }).font(type_::TITLE).color(t.text).padding(12.0))
         .child(list);
+    let divider = col().key("panel-resize").w(8.0).h_full().center().fill(t.card)
+        .motion(rune::Spring::NONE).cursor(rune::Cursor::ResizeColumn)
+        .label("Resize Chat / Teams panel with Left and Right arrows").focusable(true)
+        .on_key(|s: &mut State, e: &rune::KeyEvent, _| {
+            let delta = match e.key {
+                rune::Key::Left => -20.0,
+                rune::Key::Right => 20.0,
+                _ => return false,
+            };
+            s.panel_width = panel_width(s.panel_width, delta);
+            true
+        })
+        .on_drag(|s: &mut State, d: &mut Drag, _| {
+            if d.phase == Phase::Down { d.data = s.panel_width; }
+            s.panel_width = if d.cancelled() { d.data } else { panel_width(d.data, d.dx) };
+        })
+        .child(el().w(1.0).h_full().fill(t.text_secondary));
     static CHAT_ICON: rune::Icon = rune::Icon {
         name: "nav-chat", view: 24.0,
         body: r#"<path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z M7 9h10 M7 13h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>"#,
@@ -497,7 +578,23 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 let time = note(m.time.get(11..16).unwrap_or(&m.time)).font(type_::LABEL);
                 let bubble = col().max_w(520.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(12.0)
                     .fill(if m.mine { tok::accent(0, true).alpha(0.3) } else { t.card })
-                    .child(text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true));
+                    .border(2.0, tok::accent(0, true).alpha(if s.reply_highlight_on && s.reply_highlight.as_ref().is_some_and(|(id, _)| id == &m.id) { 1.0 } else { 0.0 }))
+                    .children(m.reply.as_ref().map(|reply| {
+                        let target = reply.id.clone();
+                        col().w_full().min_w(0.0).gap(4.0).padding(8.0).mb(6.0).radius(4.0).fill(t.bg)
+                            .border_sides([0.0, 0.0, 0.0, 2.0], t.text_secondary)
+                            .cursor(rune::Cursor::Pointer).hover(t.hover)
+                            .label("Go to quoted message").focusable(true)
+                            .on_press_tx(move |s: &mut State, tx| {
+                                s.reply_highlight = None;
+                                s.reply_error = None;
+                                s.reply_target = Some(target.clone());
+                                reveal_reply(s, tx);
+                            })
+                            .child(note(&format!("{}  {}", reply.sender, if reply.time.is_empty() { String::new() } else { format!("{} UTC", reply.time.get(..16).unwrap_or(&reply.time).replace('T', " ")) })).font(type_::LABEL).wrap())
+                            .child(text(reply.text.as_str()).font(type_::BODY).color(t.text).wrap())
+                    }))
+                    .children((!m.text.is_empty()).then(|| text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true)));
                 // Keyed by id, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
                 let line = row().key(format!("msg/{}", m.id)).arrives_whole().w_full().gap(8.0).mt(if head { 10.0 } else { 0.0 });
                 let line = if edge == Some(i) {
@@ -521,12 +618,14 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .child(avatar(title, 32.0))
                     .child(text(title).font(type_::TITLE).color(t.text).truncate()))
                 // A growth stack, so a sent message and the viewport following it glide in as one.
-                .child(with_bar("messages", col().w_full().px(16.0).py(8.0)
-                    .child(col().w_full().gap(4.0).growth(GrowthSpec::default())
+                .child(with_bar("messages", col().w_full().items_center().px(16.0).py(8.0)
+                    .child(col().w_full().max_w(1040.0).gap(4.0).growth(GrowthSpec::default())
                         .children(bubbles)
                         .children(msgs.is_empty().then(|| note("No messages."))))
                     .scroll(ScrollSpec { stick_bottom: true }).scroll_anchor().grow(1.0).min_h(0.0), &s.msg_bar))
-                .child(col().w_full().gap(6.0).px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
+                .child(col().w_full().items_center().px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
+                    .child(col().w_full().max_w(1040.0).gap(6.0)
+                    .children(s.reply_error.as_deref().map(|e| note(e).wrap()))
                     .children(s.send_error.as_deref().map(|e| note(e).wrap()))
                     .child(row().w_full().gap(8.0).items_end()
                         .child(col().grow(1.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
@@ -535,12 +634,16 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                                 .caret(t.text, tok::accent(0, true).alpha(0.3))
                                 .on_edit(|s: &mut State| &mut s.draft)
                                 .on_submit(|s: &mut State, _| send(s)), 1, 6)))
-                        .child(button("send", "Send", true, send))))
+                        .child(button("send", "Send", true, send)))))
         }
     };
     col().w_full().h_full().fill(t.bg).child(search)
-        .child(row().w_full().grow(1.0).min_h(0.0).child(rail).child(sidebar).child(pane))
+        .child(row().w_full().grow(1.0).min_h(0.0).child(rail).child(sidebar).child(divider).child(pane))
         .children(results)
+}
+
+fn panel_width(start: f32, delta: f32) -> f32 {
+    (start + delta).clamp(0.0, 480.0)
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
@@ -569,7 +672,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 
 fn demo(s: &mut State) {
     let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), preview: preview.into(), time: time.into() };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), sender: sender.into(), text: text.into(), time: time.into(), mine };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), text: text.into(), time: time.into(), mine, reply: None };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
@@ -596,6 +699,15 @@ fn main() {
             ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
             ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
             ("main", demo),
+            ("reply", |s| {
+                demo(s);
+                if let Some(Ok(page)) = &mut s.messages {
+                    let original = page.msgs[0].clone();
+                    page.msgs[1].reply = Some(teams::Reply {
+                        id: original.server_id, sender: original.sender, time: original.time, text: original.text,
+                    });
+                }
+            }),
             ("teams", |s| {
                 demo(s);
                 s.show_teams = true;
@@ -636,6 +748,52 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reply_highlight_blinks_three_times_then_stops() {
+        assert_eq!(reply_blink(0.0), Some(true));
+        assert_eq!(reply_blink(0.31), Some(false));
+        assert_eq!(reply_blink(0.61), Some(true));
+        assert_eq!(reply_blink(0.91), Some(false));
+        assert_eq!(reply_blink(1.21), Some(true));
+        assert_eq!(reply_blink(1.51), Some(false));
+        assert_eq!(reply_blink(1.8), None);
+        assert_eq!(reply_blink(10.0), None);
+    }
+
+    #[test]
+    fn reply_navigation_resolves_server_ids_and_handles_missing_messages() {
+        let mut s = init();
+        demo(&mut s);
+        let mut tx = Tx::default();
+        if let Some(Ok(page)) = &mut s.messages {
+            page.msgs[0].server_id = "server-original".into();
+        }
+        s.reply_target = Some("server-original".into());
+        assert!(reveal_reply(&mut s, &mut tx));
+        assert!(s.reply_target.is_none());
+        assert!(s.reply_error.is_none());
+        assert_eq!(s.reply_highlight.as_ref().unwrap().0, "2026-11-14T10:20:00Z");
+        assert!(s.reply_highlight_on);
+        s.reply_target = Some("deleted".into());
+        assert!(reveal_reply(&mut s, &mut tx));
+        assert!(s.reply_target.is_none());
+        assert!(s.reply_error.is_some());
+        s.reply_target = Some("old-message".into());
+        navigate(&mut s, false);
+        assert!(s.reply_highlight.is_none());
+        assert!(s.reply_target.is_none());
+        assert!(s.reply_error.is_none());
+    }
+
+    #[test]
+    fn panel_resize_limits_and_reopening() {
+        assert_eq!(panel_width(300.0, 60.0), 360.0);
+        assert_eq!(panel_width(300.0, -500.0), 0.0);
+        assert_eq!(panel_width(0.0, 80.0), 80.0);
+        assert_eq!(panel_width(300.0, 500.0), 480.0);
+        assert_eq!(panel_width(480.0, -40.0), 440.0);
+    }
 
     #[test]
     fn navigation_separates_chats_and_channels_without_refetching_loaded_teams() {
