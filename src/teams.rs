@@ -7,6 +7,8 @@ use serde_json::Value;
 pub struct Chat {
     pub id: String,
     pub title: String,
+    pub avatar_id: String,
+    pub avatar_members: Vec<User>,
     pub preview: String,
     /// ISO 8601, UTC.
     pub time: String,
@@ -52,6 +54,8 @@ fn parse_teams(v: &Value) -> Result<Vec<Team>, String> {
                 Ok(Chat {
                     id: id.into(),
                     title: channel["displayName"].as_str().unwrap_or("Channel").into(),
+                    avatar_id: String::new(),
+                    avatar_members: Vec::new(),
                     preview: String::new(),
                     time: String::new(),
                     unread: false,
@@ -68,6 +72,7 @@ pub struct Msg {
     pub id: String,
     pub server_id: String,
     pub sender: String,
+    pub sender_id: String,
     pub text: String,
     pub time: String,
     pub mine: bool,
@@ -171,20 +176,28 @@ pub fn chats(s: &Session) -> Result<Vec<Chat>, String> {
     Ok(parse_chats(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user))
 }
 
-/// Names chats after their people. Slow (a request per untitled group chat), so done after the list shows.
+/// Resolves names and group avatar members after the initial chat list shows.
 pub fn name_chats(s: &Session, mut chats: Vec<Chat>) -> Vec<Chat> {
     let me = format!("8:orgid:{}", s.user.id);
     // Chats carry no names. Who each is named after: a 1:1's other person (in its id), or the
-    // members of a group chat without a topic (a request each; there are few).
+    // group members for their avatar collage and untitled chat names.
     // The member lookups run at once: one after another they add up.
     let people: Vec<Vec<String>> = std::thread::scope(|scope| {
         let jobs: Vec<_> = chats.iter().map(|c| match peer(&c.id, &s.user.id) {
+            Some(_) if c.avatar_id.starts_with("28:") => Ok(vec![c.avatar_id.clone()]),
             Some(p) => Ok(vec![format!("8:orgid:{p}")]),
-            None if c.title == UNTITLED => Err(scope.spawn(|| members(s, &c.id).unwrap_or_default().into_iter().filter(|m| *m != me).collect())),
+            None if c.id.ends_with("@thread.v2") => Err(scope.spawn(|| members(s, &c.id).unwrap_or_default().into_iter().filter(|m| *m != me).collect())),
             None => Ok(vec![]),
         }).collect();
         jobs.into_iter().map(|j| j.unwrap_or_else(|h| h.join().unwrap_or_default())).collect()
     });
+    for (chat, people) in chats.iter_mut().zip(&people) {
+        if chat.id.ends_with("@thread.v2") {
+            chat.avatar_members = people.iter().take(3).map(|mri| User {
+                id: avatar_id(mri), name: "?".into(), ..User::default()
+            }).collect();
+        }
+    }
     let mut all: Vec<&String> = people.iter().flatten().collect();
     all.sort();
     all.dedup();
@@ -204,7 +217,11 @@ pub fn name_chats(s: &Session, mut chats: Vec<Chat>) -> Vec<Chat> {
     let name = |mri: &str| profiles.iter().find(|p| p["mri"] == mri).and_then(|p| p["displayName"].as_str()).filter(|n| !n.is_empty());
     for (c, people) in chats.iter_mut().zip(&people) {
         let names: Vec<&str> = people.iter().filter_map(|p| name(p)).collect();
-        if !names.is_empty() {
+        for member in &mut c.avatar_members {
+            let mri = if member.id.starts_with("28:") { member.id.clone() } else { format!("8:orgid:{}", member.id) };
+            if let Some(name) = name(&mri) { member.name = name.into(); }
+        }
+        if !names.is_empty() && (c.title == UNTITLED || peer(&c.id, &s.user.id).is_some()) {
             c.title = names.join(", ");
         }
     }
@@ -218,8 +235,16 @@ fn members(s: &Session, chat_id: &str) -> Result<Vec<String>, String> {
     Ok(v["members"].as_array().unwrap_or(&empty).iter().filter_map(|m| m["id"].as_str().map(String::from)).collect())
 }
 
+/// Preserve bot MRIs: their GUIDs are not Entra user IDs.
+fn avatar_id(from: &str) -> String {
+    let mri = from.rsplit('/').next().unwrap_or("");
+    if let Some(id) = mri.strip_prefix("8:orgid:") { id.into() }
+    else if mri.starts_with("28:") { mri.into() }
+    else { String::new() }
+}
+
 /// The other person's object id in a 1:1 chat, whose id is `19:{oid}_{oid}@unq.gbl.spaces`.
-fn peer<'a>(chat_id: &'a str, me: &str) -> Option<&'a str> {
+pub fn peer<'a>(chat_id: &'a str, me: &str) -> Option<&'a str> {
     let (a, b) = chat_id.strip_prefix("19:")?.strip_suffix("@unq.gbl.spaces")?.split_once('_')?;
     Some(if a == me { b } else { a })
 }
@@ -299,6 +324,11 @@ pub fn parse_chats(v: &Value, me: &User) -> Vec<Chat> {
             Chat {
                 id: c["id"].as_str().unwrap_or("").into(),
                 title: title.into(),
+                avatar_members: Vec::new(),
+                avatar_id: {
+                    let sender = avatar_id(last["from"].as_str().unwrap_or(""));
+                    if sender.starts_with("28:") { sender } else { String::new() }
+                },
                 preview: html_to_text(last["content"].as_str().unwrap_or("")).lines().next().unwrap_or("").into(),
                 time: last["composetime"].as_str().unwrap_or("").into(),
                 unread: chat_unread(c, &me.id),
@@ -336,6 +366,7 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
                 id: m["clientmessageid"].as_str().or(m["id"].as_str()).unwrap_or("").into(),
                 server_id: m["id"].as_str().unwrap_or("").into(),
                 sender: m["imdisplayname"].as_str().unwrap_or("").into(),
+                sender_id: avatar_id(m["from"].as_str().unwrap_or("")),
                 text: if text.is_empty() && reply.is_none() { "[attachment]".into() } else { text },
                 time: m["composetime"].as_str().unwrap_or("").into(),
                 mine: !me.is_empty() && m["from"].as_str().unwrap_or("").ends_with(me),
@@ -414,9 +445,24 @@ fn encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn bot_avatar_identity_is_preserved() {
+        let mri = "28:ca9e26b7-dce5-44a0-b2b7-a70a3d65ce25";
+        let from = format!("https://chat/v1/users/ME/contacts/{mri}");
+        let chats = super::parse_chats(&serde_json::json!({"conversations": [{
+            "id": "19:me_bot@unq.gbl.spaces",
+            "lastMessage": {"from": from, "imdisplayname": "GitHub Notifications"}
+        }]}), &crate::auth::User::default());
+        assert_eq!(chats[0].avatar_id, mri);
+        let messages = super::parse_messages(&serde_json::json!({"messages": [{
+            "from": from, "messagetype": "Text", "content": "Notification"
+        }]}), "me");
+        assert_eq!(messages[0].sender_id, mri);
+    }
+
+    #[test]
     fn read_marker_keeps_server_and_client_message_ids_separate() {
         let message = super::Msg {
-            id: "client-123".into(), server_id: "101".into(), sender: "Other".into(),
+            id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
             text: "Hello".into(), time: String::new(), mine: false, reply: None,
         };
         let marker = super::read_marker(&message, 999);
@@ -543,6 +589,8 @@ mod tests {
             {"messagetype": "Text", "content": "one", "imdisplayname": "Bob", "from": "https://x/contacts/8:orgid:bob", "composetime": "1"},
         ]});
         let m = parse_messages(&v, "me-oid");
+        assert_eq!(m[0].sender_id, "bob");
+        assert_eq!(m[1].sender_id, "me-oid");
         assert_eq!(m.iter().map(|m| (m.text.as_str(), m.mine)).collect::<Vec<_>>(), [("one", false), ("two", true)]);
     }
 
@@ -555,7 +603,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), text: id.into(), time: time.into(), mine: false, reply: None };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);

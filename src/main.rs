@@ -1,6 +1,7 @@
 //! A Teams desktop client: device-code sign-in that lasts across launches, then your chats.
 
 mod auth;
+mod avatars;
 mod teams;
 
 use auth::Session;
@@ -24,6 +25,7 @@ type Messages = Result<Page, String>;
 
 struct State {
     screen: Screen,
+    avatars: avatars::Avatars,
     panel_width: f32,
     reply_target: Option<String>,
     reply_error: Option<String>,
@@ -58,6 +60,7 @@ struct State {
 fn init() -> State {
     State {
         screen: Screen::Loading,
+        avatars: Default::default(),
         panel_width: 300.0,
         reply_target: None,
         reply_error: None,
@@ -117,6 +120,7 @@ fn sign_in(s: &mut State, interactive: bool) {
 }
 
 fn sign_out(s: &mut State) {
+    s.avatars = Default::default();
     s.reply_highlight = None;
     s.reply_target = None;
     s.reply_error = None;
@@ -225,7 +229,7 @@ fn send(s: &mut State) {
     let msg_id = teams::new_msg_id();
     if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None });
     }
     s.draft.clear();
     s.send_error = None;
@@ -338,6 +342,14 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             }
         }
         changed = true;
+    }
+    if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
+        let ids = std::iter::once(session.user.id.clone())
+            .chain(chats.iter().map(|c| chat_avatar_id(c, &session.user.id).to_owned()))
+            .chain(chats.iter().flat_map(|c| c.avatar_members.iter().take(3).map(|m| m.id.clone())))
+            .chain(s.messages.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flat_map(|p| p.msgs.iter().map(|m| m.sender_id.clone())));
+        changed |= s.avatars.poll(session, ids, s.waker.clone().unwrap());
+        tx.wake_after(std::time::Duration::from_secs(60));
     }
     let revealed = reveal_reply(s, tx);
     changed || revealed
@@ -479,6 +491,40 @@ fn avatar(name: &str, size: f32) -> El {
         .child(text(initials.as_str()).font(type_::LABEL).color(tok::theme(true).bg))
 }
 
+fn chat_avatar_id<'a>(chat: &'a Chat, me: &'a str) -> &'a str {
+    if !chat.avatar_id.is_empty() { &chat.avatar_id }
+    else if chat.id == "48:notes" { me }
+    else { teams::peer(&chat.id, me).unwrap_or("") }
+}
+
+fn chat_avatar(s: &State, chat: &Chat, me: &str, size: f32) -> El {
+    let members = &chat.avatar_members;
+    if members.len() < 2 {
+        return user_avatar(s, chat_avatar_id(chat, me), &chat.title, size);
+    }
+    let tile = |member: &auth::User, w: f32, h: f32| {
+        match s.avatars.get(&member.id) {
+            Some(image) => el().size(w, h).pixels_fit(image.pixels(), rune::SurfaceFit::Fill),
+            None => avatar(&member.name.chars().take(1).collect::<String>(), w.max(h)).size(w, h).radius(0.0).clip_rounded(0.0),
+        }
+    };
+    let half = size / 2.0;
+    let right = if members.len() >= 3 {
+        col().size(half, size)
+            .child(tile(&members[1], half, half))
+            .child(tile(&members[2], half, half))
+    } else { tile(&members[1], half, size) };
+    row().size(size, size).clip_rounded(half).label(chat.title.as_str())
+        .child(tile(&members[0], half, size)).child(right)
+}
+
+fn user_avatar(s: &State, id: &str, name: &str, size: f32) -> El {
+    match s.avatars.get(id) {
+        Some(image) => el().size(size, size).clip_rounded(size / 2.0).pixels(image.pixels()).label(name),
+        None => avatar(name, size),
+    }
+}
+
 fn loading_messages() -> El {
     static RING: rune::Icon = rune::Icon {
         name: "message-loader",
@@ -498,7 +544,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         .child(text(session.user.name.as_str()).font(type_::TITLE).color(t.text).truncate())
         .child(note(&session.user.email).truncate());
     let header = row().w_full().gap(10.0).padding(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
-        .child(avatar(&session.user.name, 36.0)).child(me)
+        .child(user_avatar(s, &session.user.id, &session.user.name, 36.0)).child(me)
         .child(el().key("sign-out").role("button").label("Sign out").focusable(true).px(10.0).py(6.0).radius(6.0)
             .fill(t.control_off).hover(t.hover).on_press(sign_out)
             .child(text("Sign out").font(type_::LABEL).color(t.text)));
@@ -513,7 +559,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 s.search.clear();
                 open_chat(s, id.clone());
             })
-            .children((!s.show_teams).then(|| avatar(&c.title, 36.0)))
+            .children((!s.show_teams).then(|| chat_avatar(s, c, &session.user.id, 36.0)))
             .child(col().gap(2.0).grow(1.0).min_w(0.0)
                 .child(row().w_full().gap(8.0)
                     .child(text(c.title.as_str()).font(title_font).color(if c.unread { t.text } else { t.text_secondary }).truncate().grow(1.0).min_w(0.0))
@@ -675,7 +721,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 let line = if m.mine {
                     line.justify_end().items_end().child(content)
                 } else {
-                    line.child(if head { avatar(&m.sender, 32.0) } else { el().w(32.0) })
+                    line.child(if head { user_avatar(s, &m.sender_id, &m.sender, 32.0) } else { el().w(32.0) })
                         .child(content)
                 };
                 let divider = new_day.then(|| row().key(format!("day/{}", m.id)).arrives_whole().w_full().justify_center().mt(10.0)
@@ -683,7 +729,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 divider.into_iter().chain([line])
             });
             pane.child(row().w_full().gap(10.0).px(16.0).py(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
-                    .child(avatar(title, 32.0))
+                    .child(chats.iter().find(|c| &c.id == id).map_or_else(|| avatar(title, 32.0), |c| chat_avatar(s, c, &session.user.id, 32.0)))
                     .child(text(title).font(type_::TITLE).color(t.text).truncate()))
                 // A growth stack, so a sent message and the viewport following it glide in as one.
                 .child(with_bar("messages", col().w_full().items_center().px(16.0).py(8.0)
@@ -739,8 +785,8 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 }
 
 fn demo(s: &mut State) {
-    let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), preview: preview.into(), time: time.into(), unread: id == "b" };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), text: text.into(), time: time.into(), mine, reply: None };
+    let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b" };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
@@ -748,7 +794,7 @@ fn demo(s: &mut State) {
         }),
         chats: vec![
             chat("a", "Charles Babbage", "The engine needs another column of gears, I think", "2026-11-14T10:31:00Z"),
-            chat("b", "Design review", "Moved to Thursday", "2026-11-14T09:02:00Z"),
+            Chat { avatar_members: ["Charles Babbage", "Ada Lovelace", "Mary Somerville"].into_iter().map(|name| auth::User { name: name.into(), ..Default::default() }).collect(), ..chat("b", "Design review", "Moved to Thursday", "2026-11-14T09:02:00Z") },
             chat("c", "Mary Somerville", "Thanks!", "2026-11-12T17:45:00Z"),
         ],
     };
@@ -782,6 +828,7 @@ fn main() {
                 s.selected = None;
                 s.messages = None;
                 let channel = |id: &str, title: &str| Chat {
+                    avatar_id: String::new(), avatar_members: Vec::new(),
                     id: id.into(), title: title.into(), preview: String::new(), time: String::new(), unread: false,
                 };
                 s.teams = Some(Ok(vec![
@@ -993,5 +1040,21 @@ mod tests {
         assert_eq!(offset_at(at, -50.0), 0.0, "dragged past the top");
         at.max[1] = 1e6; // long content: thumb keeps its minimum
         assert_eq!(thumb(at)[3], 24.0);
+    }
+}
+
+#[cfg(test)]
+mod avatar_tests {
+    use super::{chat_avatar_id, Chat};
+
+    #[test]
+    fn self_chat_uses_own_photo() {
+        let chat = |id: &str| Chat { id: id.into(), avatar_id: String::new(), avatar_members: Vec::new(), title: String::new(), preview: String::new(), time: String::new(), unread: false };
+        let mut bot = chat("19:me_bot@unq.gbl.spaces");
+        bot.avatar_id = "28:bot".into();
+        assert_eq!(chat_avatar_id(&bot, "me"), "28:bot");
+        assert_eq!(chat_avatar_id(&chat("48:notes"), "me"), "me");
+        assert_eq!(chat_avatar_id(&chat("19:me_other@unq.gbl.spaces"), "me"), "other");
+        assert_eq!(chat_avatar_id(&chat("19:group@thread.v2"), "me"), "");
     }
 }
