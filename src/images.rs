@@ -1,4 +1,5 @@
-//! Pictures in messages (the `image` feature), fetched from Teams' media store and kept in a
+//! Pictures in messages (the `image` feature), fetched from Teams' media store (and file previews
+//! from SharePoint) and kept in a
 //! memory LRU (the least recently shown are dropped past a budget) over a disk LRU, so a
 //! restart or an evicted picture reads the file instead of the network. No credentials are written.
 use crate::auth::{Session, agent};
@@ -90,8 +91,15 @@ impl Images {
 }
 
 fn load(s: &Session, url: &str, cache: &ImageCache) -> Option<Image> {
-    // The URL carries no secret but the request does: only send the token to Teams' media hosts.
-    if !crate::teams::ams_preview(url).is_some_and(|p| p == url || full(&p) == url) { return None; }
+    // The URL carries no secret but the request does: each token goes only to the hosts it's for.
+    let auth = if let Some(host) = crate::teams::thumbnail_host(url) {
+        format!("Bearer {}", crate::auth::sharepoint_access(host).ok()?)
+    } else if crate::teams::ams_preview(url).is_some_and(|p| p == url || full(&p) == url) {
+        format!("skype_token {}", s.skype_token)
+    } else {
+        return None;
+    };
+    // SharePoint thumbnails change with their file, so `file_name` keeps them off disk.
     let path = rune::dirs::AppDirs::new("ms-teams-agent").filter(|_| crate::avatars::valid_id(&s.user.id))
         .zip(file_name(url)).map(|(d, name)| d.cache().join("images").join(&s.user.id).join(name));
     // Teams media objects never change, so a cached file is always current.
@@ -103,7 +111,7 @@ fn load(s: &Session, url: &str, cache: &ImageCache) -> Option<Image> {
             return Some(image);
         }
     }
-    let mut res = agent().get(url).header("Authorization", &format!("skype_token {}", s.skype_token)).call().ok()?;
+    let mut res = agent().get(url).header("Authorization", &auth).call().ok()?;
     if !res.status().is_success() { return None; }
     let bytes = res.body_mut().with_config().limit(MAX_BYTES).read_to_vec().ok()?;
     // Rune decodes off this thread, caps dimensions and allocation, and turns a codec panic into an error.

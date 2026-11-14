@@ -252,7 +252,7 @@ fn send(s: &mut State) {
     }
     if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: local, links: vec![] });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: local, links: vec![], files: vec![] });
     }
     s.draft.clear();
     s.send_error = None;
@@ -408,7 +408,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         #[cfg(feature = "image")]
         {
             // The open picture's full size first, so it isn't queued behind the chat's previews.
-            let urls = s.viewer.iter().map(|u| images::full(u)).chain(s.messages.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flat_map(|p| p.msgs.iter().flat_map(|m| m.images.iter().cloned())));
+            let urls = s.viewer.iter().map(|u| images::full(u)).chain(s.messages.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flat_map(|p| p.msgs.iter().flat_map(|m| m.images.iter().cloned().chain(m.files.iter().filter_map(|f| f.preview.clone())))));
             changed |= s.images.poll(session, urls, s.waker.clone().unwrap());
         }
         tx.wake_after(std::time::Duration::from_secs(60));
@@ -670,6 +670,47 @@ fn message_image(_: &State, _: &str) -> El {
     text("[image]").font(type_::BODY).color(tok::theme(true).text_secondary)
 }
 
+/// A shared file as Teams shows it: its name over a preview of its first page, or its icon when
+/// there's none (not on SharePoint, or not shared with us). A click opens it in the browser.
+fn file_card(s: &State, f: &teams::File) -> El {
+    static DOC: rune::Icon = rune::Icon { name: "file-doc", view: 24.0, body: r#"<path d="M6 2.75h8l4.25 4.25v14.25H6z M14 2.75V7h4.25 M9 12h6 M9 15h6 M9 18h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>"# };
+    const W: f32 = 360.0;
+    const PREVIEW_H: f32 = 200.0;
+    let t = tok::theme(true);
+    // Office's colours, so a Word file reads as Word at a glance.
+    let tint = match f.kind.as_str() {
+        "doc" | "docx" => rune::color::hex("#185abd").unwrap_or(t.text_secondary),
+        "xls" | "xlsx" | "csv" => rune::color::hex("#107c41").unwrap_or(t.text_secondary),
+        "ppt" | "pptx" => rune::color::hex("#c43e1c").unwrap_or(t.text_secondary),
+        "pdf" => rune::color::hex("#d13438").unwrap_or(t.text_secondary),
+        "loop" => rune::color::hex("#7b5ce6").unwrap_or(t.text_secondary),
+        _ => t.text_secondary,
+    };
+    #[cfg(feature = "image")]
+    let preview = f.preview.as_deref().map_or(Some(None), |u| s.images.get(u));
+    #[cfg(not(feature = "image"))]
+    let preview: Option<Option<&rune::Image>> = { let _ = s; Some(None) };
+    let body = el().w_full().h(PREVIEW_H).clip_rounded(0.0).fill(t.bg);
+    let body = match preview {
+        // Full width from the top, as Teams crops a page's preview.
+        Some(Some(image)) => {
+            let [w, h] = image.size().unwrap_or([1, 1]);
+            body.fill(rune::Color::WHITE).child(el().w(W).h(W * h as f32 / w.max(1) as f32).pixels_fit(image.pixels(), rune::SurfaceFit::Fit).a11y_hidden())
+        }
+        Some(None) => body.center().child(rune::icon(&DOC, 40.0).color(tint)),
+        None => body,
+    };
+    let url = f.url.clone();
+    col().w(W).radius(8.0).clip_rounded(8.0).fill(t.card).border(1.0, t.separator)
+        .role("link").label(format!("Open {}", f.name)).help(f.url.as_str()).focusable(true)
+        .cursor(rune::Cursor::Pointer).hover(t.hover)
+        .on_press_tx(move |_: &mut State, tx| { let _ = tx.open_url(&url); })
+        .child(row().w_full().items_center().gap(10.0).px(12.0).py(10.0).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+            .child(rune::icon(&DOC, 24.0).color(tint))
+            .child(text(f.name.as_str()).font(type_::TITLE).color(t.text).truncate().min_w(0.0)))
+        .child(body)
+}
+
 /// A picture waiting in the draft, with a button to take it out.
 fn pasted_image(image: &rune::Image, i: usize) -> El {
     static CLOSE: rune::Icon = rune::Icon { name: "pasted-remove", view: 16.0, body: r#"<path d="M4 4l8 8 M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"# };
@@ -893,7 +934,9 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     }))
                     .children((!m.text.is_empty()).then(|| message_text(m)))
                     .children((!m.images.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0).mt(if m.text.is_empty() { 0.0 } else { 8.0 })
-                        .children(m.images.iter().map(|url| message_image(s, url)))));
+                        .children(m.images.iter().map(|url| message_image(s, url)))))
+                    .children((!m.files.is_empty()).then(|| col().gap(8.0).mt(if m.text.is_empty() && m.images.is_empty() { 0.0 } else { 8.0 })
+                        .children(m.files.iter().map(|f| file_card(s, f)))));
                 // Keyed by id, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
                 let line = row().key(format!("msg/{}", m.id)).arrives_whole().w_full().gap(8.0).pt(if head { 12.0 } else { 0.0 });
                 let line = if edge == Some(i) {
@@ -980,7 +1023,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 
 fn demo(s: &mut State) {
     let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b" };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![] };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![], files: vec![] };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
@@ -1016,6 +1059,24 @@ fn image_demo(s: &mut State) {
     }
 }
 
+/// A Loop page with a preview of its first page, and a Word file that isn't shared with us.
+#[cfg(feature = "image")]
+fn file_demo(s: &mut State) {
+    demo(s);
+    let file = |name: &str, kind: &str, url: &str| teams::File { name: name.into(), kind: kind.into(), url: url.into(), preview: teams::sharepoint_thumbnail(url) };
+    let page = file("Engine Notes.loop", "loop", "https://contoso.sharepoint.com/:fl:/g/notes");
+    let doc = file("Analytical Engine SLA.docx", "docx", "https://contoso-my.sharepoint.com/p/SLA.docx");
+    // A page of grey text lines on white, small enough that rune decodes it on this thread.
+    let w = 60u32;
+    let px: Vec<u8> = (0..w * w).flat_map(|i| { let (x, y) = (i % w, i / w); if y % 6 == 3 && x > 4 && x < 30 + y % 25 { [90, 90, 90, 255] } else { [255; 4] } }).collect();
+    s.images.insert(page.preview.clone().unwrap(), Some(rune::ImageCache::new(Arc::new(|| {})).rgba(w, w, px)));
+    s.images.insert(doc.preview.clone().unwrap(), None);
+    if let Some(Ok(p)) = &mut s.messages {
+        p.msgs[0].files = vec![page];
+        p.msgs[2].files = vec![doc];
+    }
+}
+
 fn main() {
     rune::run(AppSpec::<State> {
         scenes: &[
@@ -1039,6 +1100,8 @@ fn main() {
                     (page.msgs[0].text, page.msgs[0].links) = (text, links);
                 }
             }),
+            #[cfg(feature = "image")]
+            ("file", file_demo),
             #[cfg(feature = "image")]
             ("image", image_demo),
             #[cfg(feature = "image")]

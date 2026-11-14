@@ -184,12 +184,34 @@ pub fn resume() -> Result<Option<Session>, String> {
 
 /// CSA uses a different audience from chat; request it only when Teams is opened.
 pub fn teams_access() -> Result<String, String> {
+    access_for("https://chatsvcagg.teams.microsoft.com/.default offline_access")
+}
+
+/// For a SharePoint site's files API (file previews). Every preview needs one, so it's kept
+/// while it's fresh.
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
+pub fn sharepoint_access(host: &str) -> Result<String, String> {
+    // Access tokens last 60 to 90 minutes.
+    const FRESH: Duration = Duration::from_secs(45 * 60);
+    static TOKENS: std::sync::Mutex<Vec<(String, String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+    let mut tokens = TOKENS.lock().map_err(|e| e.to_string())?;
+    tokens.retain(|(_, _, at)| at.elapsed() < FRESH);
+    if let Some((_, token, _)) = tokens.iter().find(|(h, _, _)| h == host) {
+        return Ok(token.clone());
+    }
+    let token = access_for(&format!("https://{host}/.default offline_access"))?;
+    tokens.push((host.into(), token.clone(), std::time::Instant::now()));
+    Ok(token)
+}
+
+/// An access token for `scope`'s audience from the stored session; each audience needs its own.
+fn access_for(scope: &str) -> Result<String, String> {
     let refresh = std::fs::read_to_string(session_file()?).map_err(|e| e.to_string())?;
     let v = post(&endpoint("token"), &[
         ("grant_type", "refresh_token"),
         ("client_id", &client_id()),
         ("refresh_token", refresh.trim()),
-        ("scope", "https://chatsvcagg.teams.microsoft.com/.default offline_access"),
+        ("scope", scope),
     ])?;
     match parse_token(&v)? {
         Token::Ok { access, refresh } => {

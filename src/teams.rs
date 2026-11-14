@@ -82,6 +82,19 @@ pub struct Msg {
     pub images: Vec<String>,
     /// Web links in `text`: byte ranges and their URLs, from [`html_to_rich`].
     pub links: Vec<(Range<usize>, String)>,
+    /// Shared files that aren't pictures (documents, Loop pages, videos), shown as cards.
+    pub files: Vec<File>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct File {
+    pub name: String,
+    /// Its extension, lower case: `docx`, `loop`, `pdf`.
+    pub kind: String,
+    /// Where a click opens it.
+    pub url: String,
+    /// Its [`sharepoint_thumbnail`], if it's on a SharePoint site.
+    pub preview: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -408,17 +421,19 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
             }
             let (reply, (text, links)) = reply_content(raw);
             let images = images(m, raw);
+            let files = files(m);
             Some(Msg {
                 id: m["clientmessageid"].as_str().or(m["id"].as_str()).unwrap_or("").into(),
                 server_id: m["id"].as_str().unwrap_or("").into(),
                 sender: m["imdisplayname"].as_str().unwrap_or("").into(),
                 sender_id: avatar_id(m["from"].as_str().unwrap_or("")),
-                text: if text.is_empty() && reply.is_none() && images.is_empty() { "[attachment]".into() } else { text },
+                text: if text.is_empty() && reply.is_none() && images.is_empty() && files.is_empty() { "[attachment]".into() } else { text },
                 time: m["composetime"].as_str().unwrap_or("").into(),
                 mine: !me.is_empty() && m["from"].as_str().unwrap_or("").ends_with(me),
                 reply,
                 images,
                 links,
+                files,
             })
         })
         .collect();
@@ -435,6 +450,60 @@ fn images(m: &Value, raw: &str) -> Vec<String> {
     let files: Vec<Value> = m["properties"]["files"].as_str().and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default();
     let previews = files.iter().filter_map(|f| f["filePreview"]["previewUrl"].as_str());
     inline.chain(previews).filter_map(ams_preview).collect()
+}
+
+/// Shared files without a media-store picture, once each (Teams can repeat an entry dozens of times).
+fn files(m: &Value) -> Vec<File> {
+    let all: Vec<Value> = m["properties"]["files"].as_str().and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    all.iter()
+        .filter(|f| f["filePreview"]["previewUrl"].as_str().and_then(ams_preview).is_none())
+        .filter_map(|f| {
+            let info = &f["fileInfo"];
+            // Some file URLs carry raw spaces, which the system opener refuses.
+            let url = [&info["shareUrl"], &f["objectUrl"], &info["fileUrl"]].into_iter()
+                .find_map(|v| v.as_str().filter(|u| u.starts_with("https://")))?.replace(' ', "%20");
+            Some(File {
+                name: f["fileName"].as_str().or(f["title"].as_str())?.into(),
+                kind: f["fileType"].as_str().unwrap_or("").to_ascii_lowercase(),
+                preview: sharepoint_thumbnail(&url),
+                url,
+            })
+        })
+        .filter(|f| seen.insert(f.url.clone()))
+        .collect()
+}
+
+const THUMBNAIL: &str = "/driveItem/thumbnails/0/large/content";
+
+/// The SharePoint files API's thumbnail of a SharePoint file or sharing link, or `None` off SharePoint.
+pub fn sharepoint_thumbnail(url: &str) -> Option<String> {
+    let host = url.strip_prefix("https://")?.split(['/', '?']).next()?;
+    sharepoint(host).then(|| format!("https://{host}/_api/v2.1/shares/u!{}{THUMBNAIL}", b64url(url.as_bytes())))
+}
+
+/// The host a [`sharepoint_thumbnail`] URL asks, or `None` for any other URL: fetching it sends a
+/// SharePoint token, so only these may get one.
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
+pub fn thumbnail_host(url: &str) -> Option<&str> {
+    let (host, path) = url.strip_prefix("https://")?.split_once('/')?;
+    let id = path.strip_prefix("_api/v2.1/shares/u!")?.strip_suffix(THUMBNAIL)?;
+    let id_ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    (sharepoint(host) && id_ok).then_some(host)
+}
+
+/// Microsoft's SharePoint Online; a token for another tenant's site isn't issued, so ours can't leak to it.
+fn sharepoint(host: &str) -> bool {
+    host.ends_with(".sharepoint.com") && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+}
+
+/// Unpadded base64url, as the SharePoint shares API takes a URL.
+fn b64url(bytes: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    bytes.chunks(3).flat_map(|c| {
+        let n = c.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        (0..=c.len()).map(move |i| ABC[(n >> (18 - 6 * i) & 63) as usize] as char)
+    }).collect()
 }
 
 /// The small preview view of a picture in Teams' media store, or `None` for any other URL:
@@ -562,7 +631,7 @@ mod tests {
     fn read_marker_keeps_server_and_client_message_ids_separate() {
         let message = super::Msg {
             id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
-            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![],
+            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![],
         };
         let marker = super::read_marker(&message, 999);
         assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
@@ -754,7 +823,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![] };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![] };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);
@@ -782,6 +851,39 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(&text[links[0].0.clone()], "https://x.example/?a=1&b=2");
         assert_eq!(links[0].1, "https://x.example/?a=1&b=2");
+    }
+
+    #[test]
+    fn files_are_cards_once_each_with_previews_on_sharepoint_only() {
+        let loop_ = json!({"fileName": "Notes.loop", "fileType": "loop", "filePreview": {"previewUrl": ""},
+            "fileInfo": {"shareUrl": "https://contoso.sharepoint.com/:fl:/g/x?e=1"}, "objectUrl": "https://contoso.sharepoint.com/x.loop"});
+        let doc = json!({"fileName": "SLA.docx", "fileType": "DOCX", "fileInfo": {"fileUrl": "https://contoso-my.sharepoint.com/p/My SLA.docx"}});
+        let files = json!([
+            loop_, doc, doc,
+            {"fileName": "a.png", "fileInfo": {"shareUrl": "https://contoso.sharepoint.com/a"}, "filePreview": {"previewUrl": "https://in-api.asm.skype.com/v1/objects/0-a/views/imgo"}},
+            {"fileName": "elsewhere.pdf", "fileType": "pdf", "objectUrl": "https://evil.example/f.pdf"},
+            {"fileName": "nowhere.pdf", "objectUrl": "javascript:alert(1)"},
+        ]).to_string();
+        let v = json!({"messages": [{"messagetype": "RichText/Html", "composetime": "1", "content": "<p></p>", "properties": {"files": files}}]});
+        let m = &parse_messages(&v, "me")[0];
+        assert_eq!(m.text, "", "files aren't an [attachment]");
+        let got: Vec<_> = m.files.iter().map(|f| (f.name.as_str(), f.kind.as_str(), f.url.as_str(), f.preview.is_some())).collect();
+        assert_eq!(got, [
+            ("Notes.loop", "loop", "https://contoso.sharepoint.com/:fl:/g/x?e=1", true),
+            ("SLA.docx", "docx", "https://contoso-my.sharepoint.com/p/My%20SLA.docx", true),
+            ("elsewhere.pdf", "pdf", "https://evil.example/f.pdf", false),
+        ]);
+        let preview = m.files[0].preview.as_deref().unwrap();
+        assert_eq!(preview, "https://contoso.sharepoint.com/_api/v2.1/shares/u!aHR0cHM6Ly9jb250b3NvLnNoYXJlcG9pbnQuY29tLzpmbDovZy94P2U9MQ/driveItem/thumbnails/0/large/content");
+        assert_eq!(thumbnail_host(preview), Some("contoso.sharepoint.com"));
+        for bad in ["https://evil.example/_api/v2.1/shares/u!aHR0/driveItem/thumbnails/0/large/content",
+            "https://a@evil.com/x.sharepoint.com/_api/v2.1/shares/u!aHR0/driveItem/thumbnails/0/large/content",
+            "https://contoso.sharepoint.com/_api/v2.1/shares/u!../../x/driveItem/thumbnails/0/large/content",
+            "https://contoso.sharepoint.com/_api/v2.1/me/drive"] {
+            assert_eq!(thumbnail_host(bad), None, "{bad}");
+        }
+        assert_eq!(b64url(b"https://a"), "aHR0cHM6Ly9h");
+        assert_eq!(b64url(b"ab"), "YWI");
     }
 }
 
