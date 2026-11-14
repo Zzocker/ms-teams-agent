@@ -430,7 +430,10 @@ pub fn html_to_text(html: &str) -> String {
     let mut out = String::new();
     let mut rest = html;
     while let Some(i) = rest.find('<') {
-        out.push_str(&rest[..i]);
+        // Newlines between tags are source formatting, not content; keeping them doubles every line break.
+        if !(rest[..i].trim().is_empty() && rest[..i].contains('\n')) {
+            out.push_str(&rest[..i]);
+        }
         let Some(j) = rest[i..].find('>') else { break };
         let tag = rest[i + 1..i + j].trim_start_matches('/').split([' ', '/']).next().unwrap_or("").to_ascii_lowercase();
         if matches!(tag.as_str(), "br" | "p" | "div" | "li" | "tr") && !out.ends_with('\n') {
@@ -577,6 +580,12 @@ mod tests {
         ]});
         let chats = parse_chats(&v, &User { id: "me".into(), ..User::default() });
         assert_eq!(chats.iter().map(|c| c.preview.as_str()).collect::<Vec<_>>(), ["You: Hello", "Hello", "", "You: Hello", "Bob: Hello"]);
+    }
+
+    #[test]
+    fn html_source_newlines_between_blocks_are_not_blank_lines() {
+        let raw = "<p>Date: 15th Nov</p>\r\n<p>Time: 4:00</p>\n<p>&nbsp;</p>\n<p>Reason: x</p>";
+        assert_eq!(super::html_to_text(raw), "Date: 15th Nov\nTime: 4:00\n \nReason: x");
     }
 
     #[test]

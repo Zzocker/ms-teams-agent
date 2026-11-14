@@ -687,13 +687,13 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 // Nearby messages from one sender share an avatar, name and timestamp.
                 let head = prev.is_none_or(|p| !same_message_group(p, m));
                 let time = note(&message_time(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL);
-                let bubble = col().max_w(520.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(12.0)
+                let bubble = col().max_w(860.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(12.0)
                     .fill(if m.mine { tok::accent(0, true).alpha(0.3) } else { t.card })
                     .border(2.0, tok::accent(0, true).alpha(if s.reply_highlight_on && s.reply_highlight.as_ref().is_some_and(|(id, _)| id == &m.id) { 1.0 } else { 0.0 }))
                     .children(m.reply.as_ref().map(|reply| {
                         let target = reply.id.clone();
-                        col().w_full().min_w(0.0).gap(4.0).padding(8.0).mb(6.0).radius(4.0).fill(t.bg)
-                            .border_sides([0.0, 0.0, 0.0, 2.0], t.text_secondary)
+                        row().w_full().max_w(520.0).min_w(0.0).gap(10.0).padding(8.0).mb(6.0).radius(4.0).fill(t.bg)
+                            .border(1.0, t.separator)
                             .cursor(rune::Cursor::Pointer).hover(t.hover)
                             .label("Go to quoted message").focusable(true)
                             .on_press_tx(move |s: &mut State, tx| {
@@ -702,12 +702,14 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                                 s.reply_target = Some(target.clone());
                                 reveal_reply(s, tx);
                             })
-                            .child(note(&format!("{}  {}", reply.sender, local_time(&reply.time, "%Y-%m-%d %I:%M %p"))).font(type_::LABEL).wrap())
-                            .child(text(reply.text.as_str()).font(type_::BODY).color(t.text).wrap())
+                            .child(el().w(2.0).radius(1.0).fill(t.text_secondary))
+                            .child(col().gap(2.0).grow(1.0).shrink().min_w(0.0)
+                                .child(note(&format!("{}  {}", reply.sender, local_time(&reply.time, "%Y-%m-%d %I:%M %p"))).font(type_::LABEL).wrap())
+                                .child(text(reply.text.as_str()).font(type_::BODY).color(t.text).max_lines(2)))
                     }))
                     .children((!m.text.is_empty()).then(|| text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true)));
                 // Keyed by id, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
-                let line = row().key(format!("msg/{}", m.id)).arrives_whole().w_full().gap(8.0).mt(if head { 20.0 } else { 0.0 });
+                let line = row().key(format!("msg/{}", m.id)).arrives_whole().w_full().gap(8.0).pt(if head { 12.0 } else { 0.0 });
                 let line = if edge == Some(i) {
                     line.on_visible(|s: &mut State, on, _| if on { load_older(s) })
                 } else {
@@ -724,7 +726,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     line.child(if head { user_avatar(s, &m.sender_id, &m.sender, 32.0) } else { el().w(32.0) })
                         .child(content)
                 };
-                let divider = new_day.then(|| row().key(format!("day/{}", m.id)).arrives_whole().w_full().justify_center().mt(10.0)
+                let divider = new_day.then(|| row().key(format!("day/{}", m.id)).arrives_whole().w_full().justify_center().pt(10.0)
                     .child(note(&message_date(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL)));
                 divider.into_iter().chain([line])
             });
