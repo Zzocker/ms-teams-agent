@@ -24,6 +24,10 @@ type Messages = Result<Page, String>;
 
 struct State {
     screen: Screen,
+    show_teams: bool,
+    teams: Option<Result<Vec<teams::Team>, String>>,
+    teams_loader: Latest<Result<Vec<teams::Team>, String>>,
+    collapsed_teams: std::collections::HashSet<String>,
     /// Bumped on every sign-in attempt, cancel and sign-out; a worker from an older one is ignored.
     attempt: Arc<AtomicU64>,
     events: (mpsc::Sender<(u64, Screen)>, mpsc::Receiver<(u64, Screen)>),
@@ -49,6 +53,10 @@ struct State {
 fn init() -> State {
     State {
         screen: Screen::Loading,
+        show_teams: false,
+        teams: None,
+        teams_loader: Latest::default(),
+        collapsed_teams: Default::default(),
         attempt: Arc::default(),
         events: mpsc::channel(),
         waker: None,
@@ -100,6 +108,10 @@ fn sign_in(s: &mut State, interactive: bool) {
 
 fn sign_out(s: &mut State) {
     s.attempt.fetch_add(1, SeqCst);
+    s.teams_loader.cancel();
+    s.teams = None;
+    s.show_teams = false;
+    s.collapsed_teams.clear();
     s.loader.cancel();
     s.sender.cancel();
     s.draft.clear();
@@ -108,6 +120,22 @@ fn sign_out(s: &mut State) {
     auth::sign_out();
     (s.selected, s.messages) = (None, None);
     s.screen = Screen::Login(None);
+}
+
+fn navigate(s: &mut State, teams: bool) {
+    s.show_teams = teams;
+    s.search.clear();
+    s.loader.cancel();
+    s.older_loader.cancel();
+    s.selected = None;
+    s.messages = None;
+    s.draft.clear();
+    s.send_error = None;
+    if teams && s.teams.is_none() && !s.teams_loader.is_pending() {
+        let Screen::Main { session, .. } = &s.screen else { return };
+        let session = session.clone();
+        s.teams_loader.request((), move |_| teams::teams(&session));
+    }
 }
 
 fn open_chat(s: &mut State, id: String) {
@@ -166,6 +194,7 @@ fn send(s: &mut State) {
 }
 
 fn setup(s: &mut State, waker: Waker) {
+    s.teams_loader.set_waker(waker.clone());
     s.loader.set_waker(waker.clone());
     s.sender.set_waker(waker.clone());
     s.older_loader.set_waker(waker.clone());
@@ -186,6 +215,10 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             let _ = tx.open_url(url); // the URL is also on screen if no browser opens
         }
         s.screen = screen;
+        changed = true;
+    }
+    if let Some(result) = s.teams_loader.take() {
+        s.teams = Some(result);
         changed = true;
     }
     if let Some((id, r)) = s.loader.take() {
@@ -321,6 +354,17 @@ fn avatar(name: &str, size: f32) -> El {
         .child(text(initials.as_str()).font(type_::LABEL).color(tok::theme(true).bg))
 }
 
+fn loading_messages() -> El {
+    static RING: rune::Icon = rune::Icon {
+        name: "message-loader",
+        view: 16.0,
+        body: r#"<circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="2" fill="none" opacity="0.2"/><path d="M8 2A6 6 0 0 1 13.258 10.89" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>"#,
+    };
+    rune::icon(&RING, 24.0).key("message-loader")
+        .role("progressbar").label("Loading messages")
+        .color(tok::theme(true).text_secondary).looping(rune::LoopSpec::rotation(0.9))
+}
+
 fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let t = tok::theme(true);
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary);
@@ -337,28 +381,67 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         let id = c.id.clone();
         let picked = s.selected.as_ref() == Some(&c.id);
         row().key(format!("{key}/{}", c.id)).role("button").label(c.title.as_str()).focusable(true)
-            .w_full().gap(10.0).px(10.0).py(8.0).radius(8.0).items_center()
+            .w_full().gap(10.0).px(if s.show_teams { 30.0 } else { 10.0 }).py(8.0).radius(8.0).items_center()
             .fill(if picked { t.press } else { t.card }).hover(t.hover)
             .on_press(move |s: &mut State| {
                 s.search.clear();
                 open_chat(s, id.clone());
             })
-            .child(avatar(&c.title, 36.0))
+            .children((!s.show_teams).then(|| avatar(&c.title, 36.0)))
             .child(col().gap(2.0).grow(1.0).min_w(0.0)
                 .child(row().w_full().gap(8.0)
                     .child(text(c.title.as_str()).font(type_::TITLE).color(t.text).truncate().grow(1.0).min_w(0.0))
-                    .child(note(&short_time(&c.time)).font(type_::LABEL)))
-                .child(note(&c.preview).truncate()))
+                    .children((!c.time.is_empty()).then(|| note(&short_time(&c.time)).font(type_::LABEL))))
+                .children((!c.preview.is_empty()).then(|| note(&c.preview).truncate())))
     };
-    let rows = chats.iter().map(|c| chat_row(c, "chat"));
+    let mut rows: Vec<El> = Vec::new();
+    if s.show_teams {
+        match &s.teams {
+            None => rows.push(el().w_full().center().padding(20.0).motion(rune::Spring::NONE)
+                .child(loading_messages().label("Loading teams"))),
+            Some(Err(e)) => {
+                rows.push(note(e).wrap().padding(12.0));
+                rows.push(button("retry-teams", "Retry", false, |s| {
+                    s.teams = None;
+                    navigate(s, true);
+                }));
+            }
+            Some(Ok(teams)) => {
+                rows.push(note("Teams and channels").padding(10.0));
+                for team in teams {
+                    let id = team.id.clone();
+                    let collapsed = s.collapsed_teams.contains(&id);
+                    rows.push(row().key(format!("team/{id}")).role("button").label(team.title.as_str())
+                        .focusable(true).w_full().gap(8.0).padding(10.0).items_center().hover(t.hover)
+                        .on_press(move |s: &mut State| {
+                            if !s.collapsed_teams.remove(&id) { s.collapsed_teams.insert(id.clone()); }
+                        })
+                        .child(note(if collapsed { "›" } else { "⌄" }))
+                        .child(avatar(&team.title, 24.0))
+                        .child(text(team.title.as_str()).font(type_::TITLE).color(t.text).truncate().min_w(0.0)));
+                    if !collapsed {
+                        if team.channels.is_empty() { rows.push(note("No channels.").px(24.0).py(6.0)); }
+                        rows.extend(team.channels.iter().map(|c| chat_row(c, "channel")));
+                    }
+                }
+                if teams.is_empty() { rows.push(note("No teams yet.").padding(12.0)); }
+            }
+        }
+    } else {
+        rows.extend(chats.iter().map(|c| chat_row(c, "chat")));
+    }
+    let visible: Vec<&Chat> = if s.show_teams {
+        s.teams.as_ref().and_then(|r| r.as_ref().ok()).into_iter()
+            .flatten().flat_map(|team| &team.channels).collect()
+    } else { chats.iter().collect() };
     // Results float under the search bar, over the chat list, like Teams.
     let query = s.search.text.trim().to_lowercase();
     let results = (!query.is_empty()).then(|| {
-        let hits: Vec<El> = chats.iter().filter(|c| c.title.to_lowercase().contains(&query)).map(|c| chat_row(c, "hit")).collect();
+        let hits: Vec<El> = visible.iter().filter(|c| c.title.to_lowercase().contains(&query)).map(|c| chat_row(c, "hit")).collect();
         col().key("results").w(560.0).max_h(480.0).shrink().min_h(0.0).padding(6.0).gap(2.0).radius(8.0).fill(t.card)
             .border(1.0, t.separator)
             .anchored_fit("search-box", Side::Bottom, Align::Start, 4.0)
-            .child(note("Chats").font(type_::LABEL).px(10.0).py(4.0))
+            .child(note(if s.show_teams { "Channels" } else { "Chats" }).font(type_::LABEL).px(10.0).py(4.0))
             .children(hits.is_empty().then(|| note("No matches.").px(10.0).py(8.0)))
             .child(col().w_full().gap(2.0).children(hits).scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0))
     });
@@ -372,28 +455,40 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let list = with_bar("chats", col().w_full().gap(2.0).padding(6.0).children(rows)
         .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0), &s.chat_bar);
     let sidebar = col().w(300.0).h_full().min_h(0.0).fill(t.card).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
-        .child(header).child(list);
+        .child(header)
+        .child(text(if s.show_teams { "Teams" } else { "Chat" }).font(type_::TITLE).color(t.text).padding(12.0))
+        .child(list);
+    static CHAT_ICON: rune::Icon = rune::Icon {
+        name: "nav-chat", view: 24.0,
+        body: r#"<path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z M7 9h10 M7 13h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>"#,
+    };
+    static TEAMS_ICON: rune::Icon = rune::Icon {
+        name: "nav-teams", view: 24.0,
+        body: r#"<circle cx="9" cy="7" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="18" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3 21v-5a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v5 M16 13h2a3 3 0 0 1 3 3v4" fill="none" stroke="currentColor" stroke-width="1.5"/>"#,
+    };
+    let rail = col().key("navigation").w(68.0).h_full().gap(8.0).px(4.0).py(12.0)
+        .fill(t.bg).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
+        .children([(false, "Chat", &CHAT_ICON), (true, "Teams", &TEAMS_ICON)].into_iter().map(|(teams, label, icon)| {
+            col().key(label).role("button").label(label).focusable(true).w_full().center().gap(4.0).py(10.0).radius(6.0)
+                .fill(if s.show_teams == teams { t.press } else { t.bg }).hover(t.hover)
+                .on_press(move |s: &mut State| if s.show_teams != teams { navigate(s, teams) })
+                .child(rune::icon(icon, 24.0).color(t.text))
+                .child(text(label).font(type_::LABEL).color(t.text))
+        }));
 
     let pane = col().grow(1.0).shrink().h_full().min_w(0.0).min_h(0.0).fill(t.bg);
     let pane = match (&s.selected, &s.messages) {
-        (None, _) => pane.center().child(note(if chats.is_empty() { "No chats yet." } else { "Pick a chat." })),
+        (None, _) => pane.center().child(note(if s.show_teams { "Pick a channel." } else if chats.is_empty() { "No chats yet." } else { "Pick a chat." })),
         (Some(_), None) => {
-            static RING: rune::Icon = rune::Icon {
-                name: "message-loader",
-                view: 16.0,
-                body: r#"<circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="2" fill="none" opacity="0.2"/><path d="M8 2A6 6 0 0 1 13.258 10.89" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>"#,
-            };
             pane.key("messages-loading").center().motion(rune::Spring::NONE)
-                .child(rune::icon(&RING, 24.0).key("message-loader")
-                    .role("progressbar").label("Loading messages")
-                    .color(t.text_secondary).looping(rune::LoopSpec::rotation(0.9)))
+                .child(loading_messages())
         },
         (Some(_), Some(Err(e))) => pane.center().padding(32.0).child(note(e).wrap()),
         (Some(id), Some(Ok(page))) => {
             let msgs = &page.msgs;
             // Fetch older a screenful before the top, so it's usually in before the scroll gets there.
             let edge = if page.older.is_some() { Some(15.min(msgs.len().saturating_sub(1))) } else { None };
-            let title = chats.iter().find(|c| &c.id == id).map_or("Chat", |c| c.title.as_str());
+            let title = chats.iter().chain(s.teams.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flatten().flat_map(|team| &team.channels)).find(|c| &c.id == id).map_or("Chat", |c| c.title.as_str());
             let bubbles = msgs.iter().enumerate().flat_map(|(i, m)| {
                 let prev = i.checked_sub(1).map(|j| &msgs[j]);
                 let new_day = prev.is_none_or(|p| day(&p.time) != day(&m.time));
@@ -444,7 +539,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         }
     };
     col().w_full().h_full().fill(t.bg).child(search)
-        .child(row().w_full().grow(1.0).min_h(0.0).child(sidebar).child(pane))
+        .child(row().w_full().grow(1.0).min_h(0.0).child(rail).child(sidebar).child(pane))
         .children(results)
 }
 
@@ -501,6 +596,23 @@ fn main() {
             ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
             ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
             ("main", demo),
+            ("teams", |s| {
+                demo(s);
+                s.show_teams = true;
+                s.selected = None;
+                s.messages = None;
+                let channel = |id: &str, title: &str| Chat {
+                    id: id.into(), title: title.into(), preview: String::new(), time: String::new(),
+                };
+                s.teams = Some(Ok(vec![
+                    teams::Team { id: "development".into(), title: "Development".into(), channels: vec![
+                        channel("backend", "Backend"), channel("mobile", "Mobile application"), channel("notifications", "Notifications"),
+                    ] },
+                    teams::Team { id: "trential".into(), title: "Trential".into(), channels: vec![
+                        channel("general", "General"), channel("announcements", "Announcements"), channel("random", "Random"),
+                    ] },
+                ]));
+            }),
             ("loading", |s| {
                 demo(s);
                 s.messages = None;
@@ -524,6 +636,25 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_separates_chats_and_channels_without_refetching_loaded_teams() {
+        let mut s = init();
+        demo(&mut s);
+        s.teams = Some(Ok(vec![]));
+        s.draft = TextEdit::new("old chat draft");
+        s.search = TextEdit::new("old search");
+        navigate(&mut s, true);
+        assert!(s.show_teams);
+        assert!(s.selected.is_none());
+        assert!(s.messages.is_none());
+        assert!(s.search.text.is_empty());
+        assert!(s.draft.text.is_empty());
+        assert!(!s.teams_loader.is_pending());
+        navigate(&mut s, false);
+        assert!(!s.show_teams);
+        assert!(s.teams.as_ref().unwrap().as_ref().unwrap().is_empty());
+    }
 
     #[test]
     fn thumb_tracks_offset() {

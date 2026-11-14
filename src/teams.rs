@@ -13,6 +13,53 @@ pub struct Chat {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Team {
+    pub id: String,
+    pub title: String,
+    pub channels: Vec<Chat>,
+}
+
+pub fn teams(s: &Session) -> Result<Vec<Team>, String> {
+    let access = crate::auth::teams_access()?;
+    let region = s.middle_tier.rsplit('/').next().unwrap_or("").split('-').next().unwrap_or("");
+    if !matches!(region, "amer" | "emea" | "apac") {
+        return Err("Unknown Teams service region.".into());
+    }
+    let v = answer(agent()
+        .get(&format!("https://teams.microsoft.com/api/csa/{region}/api/v3/teams/users/me?isPrefetch=false&enableMembershipSummary=true"))
+        .header("Authorization", &format!("Bearer {access}"))
+        .header("Authentication", &auth(s))
+        .header("x-skypetoken", &s.skype_token)
+        .call())?;
+    parse_teams(&v)
+}
+
+fn parse_teams(v: &Value) -> Result<Vec<Team>, String> {
+    let teams = v["teams"].as_array().ok_or("Teams response has no team list")?;
+    teams.iter().map(|team| {
+        let id = ["id", "threadId"].into_iter()
+            .find_map(|key| team[key].as_str().filter(|id| !id.trim().is_empty()))
+            .ok_or_else(|| format!("Team has no ID (fields: {})", team.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default()))?;
+        let channels = team["channels"].as_array().ok_or("Team has no channel list")?;
+        Ok(Team {
+            id: id.into(),
+            title: team["displayName"].as_str().unwrap_or("Team").into(),
+            channels: channels.iter().map(|channel| {
+                let id = ["id", "threadId"].into_iter()
+                    .find_map(|key| channel[key].as_str().filter(|id| !id.trim().is_empty()))
+                    .ok_or("Channel has no ID")?;
+                Ok(Chat {
+                    id: id.into(),
+                    title: channel["displayName"].as_str().unwrap_or("Channel").into(),
+                    preview: String::new(),
+                    time: String::new(),
+                })
+            }).collect::<Result<_, String>>()?,
+        })
+    }).collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Msg {
     /// The client message id the sender gave it (the server's id if none), so a message
     /// shown as it's sent keeps its identity when the server's copy replaces it.
@@ -289,6 +336,42 @@ mod tests {
     use serde_json::json;
 
     const ME: &str = "8:orgid:me-oid";
+
+    #[test]
+    fn teams_keep_channels_under_their_team() {
+        let v = json!({"teams": [
+            {"threadId": "development", "displayName": "Development", "channels": [
+                {"id": "backend", "displayName": "Backend"},
+                {"id": "general", "displayName": "General", "isFavorite": false}
+            ]},
+            {"threadId": "empty", "displayName": "Empty", "channels": []}
+        ]});
+        let teams = parse_teams(&v).unwrap();
+        assert_eq!(teams.len(), 2);
+        assert_eq!(teams[0].title, "Development");
+        assert_eq!(teams[0].channels.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["backend", "general"]);
+        assert!(teams[1].channels.is_empty());
+        assert!(parse_teams(&json!({"teams": []})).unwrap().is_empty());
+        assert!(parse_teams(&json!({"error": "denied"})).is_err());
+        assert!(parse_teams(&json!({"teams": [{"threadId": "x", "channels": [{"displayName": "Missing ID"}]}]})).is_err());
+    }
+
+    #[test]
+    fn teams_accept_id_and_thread_id_variants() {
+        for team_key in ["id", "threadId"] {
+            for channel_key in ["id", "threadId"] {
+                let mut team = json!({"displayName": "Development", "channels": [{"displayName": "Backend"}]});
+                team[team_key] = json!("team-id");
+                team["channels"][0][channel_key] = json!("channel-id");
+                let teams = parse_teams(&json!({"teams": [team]})).unwrap();
+                assert_eq!(teams[0].id, "team-id");
+                assert_eq!(teams[0].channels[0].id, "channel-id");
+            }
+        }
+        let teams = parse_teams(&json!({"teams": [{"id": "", "threadId": "fallback", "channels": []}]})).unwrap();
+        assert_eq!(teams[0].id, "fallback");
+        assert!(parse_teams(&json!({"teams": [{"id": " ", "channels": []}]})).is_err());
+    }
 
     #[test]
     fn chats_skip_system_threads_and_channels_and_name_untitled_chats() {

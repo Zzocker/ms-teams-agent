@@ -179,6 +179,25 @@ pub fn resume() -> Result<Option<Session>, String> {
     }
 }
 
+/// CSA uses a different audience from chat; request it only when Teams is opened.
+pub fn teams_access() -> Result<String, String> {
+    let refresh = std::fs::read_to_string(session_file()?).map_err(|e| e.to_string())?;
+    let v = post(&endpoint("token"), &[
+        ("grant_type", "refresh_token"),
+        ("client_id", &client_id()),
+        ("refresh_token", refresh.trim()),
+        ("scope", "https://chatsvcagg.teams.microsoft.com/.default offline_access"),
+    ])?;
+    match parse_token(&v)? {
+        Token::Ok { access, refresh } => {
+            save(&refresh)?;
+            Ok(access)
+        }
+        Token::Rejected(e) => Err(e),
+        Token::Pending { .. } => Err("Teams authorization is pending.".into()),
+    }
+}
+
 /// The device-code flow. `on_code(user_code, verification_url)` is called once the user has
 /// something to type; `live` is checked between polls so a cancelled sign-in stops and saves nothing.
 pub fn device_login(on_code: impl FnOnce(String, String), live: impl Fn() -> bool) -> Result<Session, String> {

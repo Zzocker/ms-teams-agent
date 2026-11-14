@@ -47,12 +47,16 @@ On first start it shows a device code and opens the Microsoft sign-in page. Sign
 
 Optional environment variables: `TEAMS_TENANT` (default `organizations`), `TEAMS_CLIENT_ID`.
 
+Use **Chat** in the left rail for chats, or **Teams** for teams and their channels.
+Click a team to expand or collapse its channels. Teams load separately when first opened;
+failed requests show an error and a Retry button. Favorites are not shown.
+
 ### For agents
 
 Headless runs use built-in demo data and never touch the network:
 
 ```sh
-ms-teams-agent --list-scenes                 # login error code main loading search pick
+ms-teams-agent --list-scenes                 # login error code main teams loading search pick
 ms-teams-agent --snap out.png --scene main   # render a screen to PNG
 ms-teams-agent --tree tree.json --scene main # element tree: roles, labels, text, rects
 ```
