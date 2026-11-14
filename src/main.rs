@@ -129,10 +129,22 @@ fn button(key: &'static str, label: &'static str, primary: bool, on_press: fn(&m
         .child(text(label).font(type_::TITLE).color(t.text))
 }
 
-/// `2026-11-14T10:23:45.123Z` → `2026-11-14 10:23`.
+/// `2026-11-14T10:23:45.123Z` → `11-14 10:23`.
 // shortcut: shown in UTC; convert to local time when there's a time-zone source.
 fn short_time(iso: &str) -> String {
-    iso.get(..16).unwrap_or(iso).replace('T', " ")
+    iso.get(5..16).unwrap_or(iso).replace('T', " ")
+}
+
+fn day(iso: &str) -> &str {
+    iso.get(..10).unwrap_or(iso)
+}
+
+/// A circle with the name's initials, coloured by the name so a person keeps their colour.
+fn avatar(name: &str, size: f32) -> El {
+    let initials: String = name.split_whitespace().filter_map(|w| w.chars().next()).take(2).flat_map(char::to_uppercase).collect();
+    let hue = name.bytes().map(usize::from).sum();
+    el().size(size, size).radius(size / 2.0).center().fill(tok::accent(hue, true))
+        .child(text(initials.as_str()).font(type_::LABEL).color(tok::theme(true).bg))
 }
 
 fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
@@ -142,44 +154,63 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let me = col().gap(2.0).grow(1.0).min_w(0.0)
         .child(text(session.user.name.as_str()).font(type_::TITLE).color(t.text).truncate())
         .child(note(&session.user.email).truncate());
-    let header = row().w_full().gap(8.0).padding(12.0).child(me)
+    let header = row().w_full().gap(10.0).padding(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+        .child(avatar(&session.user.name, 36.0)).child(me)
         .child(el().key("sign-out").role("button").label("Sign out").focusable(true).px(10.0).py(6.0).radius(6.0)
             .fill(t.control_off).hover(t.hover).on_press(sign_out)
             .child(text("Sign out").font(type_::LABEL).color(t.text)));
     let rows = chats.iter().map(|c| {
         let id = c.id.clone();
         let picked = s.selected.as_ref() == Some(&c.id);
-        el().key(format!("chat/{}", c.id)).role("button").label(c.title.as_str()).focusable(true)
-            .w_full().px(12.0).py(8.0).radius(6.0)
+        row().key(format!("chat/{}", c.id)).role("button").label(c.title.as_str()).focusable(true)
+            .w_full().gap(10.0).px(10.0).py(8.0).radius(8.0).items_center()
             .fill(if picked { t.press } else { t.card }).hover(t.hover)
             .on_press(move |s: &mut State| open_chat(s, id.clone()))
-            .child(col().gap(2.0).w_full()
+            .child(avatar(&c.title, 36.0))
+            .child(col().gap(2.0).grow(1.0).min_w(0.0)
                 .child(row().w_full().gap(8.0)
                     .child(text(c.title.as_str()).font(type_::TITLE).color(t.text).truncate().grow(1.0).min_w(0.0))
                     .child(note(&short_time(&c.time)).font(type_::LABEL)))
                 .child(note(&c.preview).truncate()))
     });
-    let list = col().key("chats").w_full().gap(2.0).px(6.0).children(rows)
+    let list = col().key("chats").w_full().gap(2.0).padding(6.0).children(rows)
         .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0);
-    let sidebar = col().w(300.0).h_full().min_h(0.0).fill(t.card).child(header).child(list);
+    let sidebar = col().w(300.0).h_full().min_h(0.0).fill(t.card).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
+        .child(header).child(list);
 
-    let pane = col().grow(1.0).h_full().min_w(0.0).min_h(0.0).fill(t.bg);
+    let pane = col().grow(1.0).shrink().h_full().min_w(0.0).min_h(0.0).fill(t.bg);
     let pane = match (&s.selected, &s.messages) {
         (None, _) => pane.center().child(note(if chats.is_empty() { "No chats yet." } else { "Pick a chat." })),
         (Some(_), None) => pane.center().child(note("Loading messages…")),
         (Some(_), Some(Err(e))) => pane.center().padding(32.0).child(note(e).wrap()),
         (Some(id), Some(Ok(msgs))) => {
             let title = chats.iter().find(|c| &c.id == id).map_or("Chat", |c| c.title.as_str());
-            let bubbles = msgs.iter().enumerate().map(|(i, m)| {
-                col().key(format!("msg/{i}")).w_full().gap(2.0)
-                    .child(row().gap(8.0)
-                        .child(text(if m.mine { "You" } else { m.sender.as_str() }).font(type_::TITLE)
-                            .color(if m.mine { tok::accent(0, true) } else { t.text }))
-                        .child(note(&short_time(&m.time)).font(type_::LABEL)))
-                    .child(text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true))
+            let bubbles = msgs.iter().enumerate().flat_map(|(i, m)| {
+                let prev = i.checked_sub(1).map(|j| &msgs[j]);
+                let new_day = prev.is_none_or(|p| day(&p.time) != day(&m.time));
+                // A run of messages from one sender shares one avatar and name.
+                let head = new_day || prev.is_some_and(|p| p.sender != m.sender || p.mine != m.mine);
+                let time = note(m.time.get(11..16).unwrap_or(&m.time)).font(type_::LABEL);
+                let bubble = col().max_w(520.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(12.0)
+                    .fill(if m.mine { tok::accent(0, true).alpha(0.3) } else { t.card })
+                    .child(text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true));
+                let line = row().key(format!("msg/{i}")).w_full().gap(8.0).mt(if head { 10.0 } else { 0.0 });
+                let line = if m.mine {
+                    line.justify_end().items_end().child(time).child(bubble)
+                } else {
+                    line.child(if head { avatar(&m.sender, 32.0) } else { el().w(32.0) })
+                        .child(col().gap(4.0).grow(1.0).shrink().min_w(0.0)
+                            .children(head.then(|| text(m.sender.as_str()).font(type_::LABEL).color(t.text_secondary)))
+                            .child(row().gap(8.0).shrink().min_w(0.0).items_end().child(bubble).child(time)))
+                };
+                let divider = new_day.then(|| row().key(format!("day/{i}")).w_full().justify_center().mt(10.0)
+                    .child(note(day(&m.time)).font(type_::LABEL)));
+                divider.into_iter().chain([line])
             });
-            pane.child(row().w_full().padding(16.0).child(text(title).font(type_::TITLE).color(t.text).truncate()))
-                .child(col().key("messages").w_full().gap(14.0).px(16.0).py(8.0)
+            pane.child(row().w_full().gap(10.0).px(16.0).py(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+                    .child(avatar(title, 32.0))
+                    .child(text(title).font(type_::TITLE).color(t.text).truncate()))
+                .child(col().key("messages").w_full().gap(4.0).px(16.0).py(8.0)
                     .children(bubbles)
                     .children(msgs.is_empty().then(|| note("No messages.")))
                     .scroll(ScrollSpec { stick_bottom: true }).grow(1.0).min_h(0.0))
