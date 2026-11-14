@@ -1,0 +1,46 @@
+# ms-teams-agent
+
+A lightweight Microsoft Teams client written in Rust (UI on [Rune](https://github.com/anomalyco/rune)).
+
+Easy for both people and agents to use: run it as a normal desktop app, or run it headless to render
+screens to PNG and dump the element tree as JSON.
+
+## Install
+
+Download the build for your OS from the [Actions](../../actions) artifacts or [Releases](../../releases),
+or build it yourself with [Rust](https://rustup.rs):
+
+```sh
+cargo install --git https://github.com/Zzocker/ms-teams-agent
+```
+
+### Linux
+
+```sh
+# Arch
+sudo pacman -S fontconfig libxkbcommon vulkan-icd-loader
+# Ubuntu / Debian
+sudo apt install libfontconfig1 libxkbcommon0 libvulkan1
+
+chmod +x ms-teams-agent && ./ms-teams-agent
+```
+
+### Windows
+
+Unzip and run `ms-teams-agent.exe`. Building from source needs the MSVC toolchain (rustup's default).
+
+## Use
+
+On first start it shows a device code and opens the Microsoft sign-in page. Sign in there and the app logs in.
+
+Optional environment variables: `TEAMS_TENANT` (default `organizations`), `TEAMS_CLIENT_ID`.
+
+### For agents
+
+Headless runs use built-in demo data and never touch the network:
+
+```sh
+ms-teams-agent --list-scenes                 # login error code main search pick
+ms-teams-agent --snap out.png --scene main   # render a screen to PNG
+ms-teams-agent --tree tree.json --scene main # element tree: roles, labels, text, rects
+```

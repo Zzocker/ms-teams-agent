@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write # attach builds to the release on tags
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ubuntu, os: ubuntu-latest, bin: ms-teams-agent }
+          - { name: arch, os: ubuntu-latest, container: "archlinux:latest", bin: ms-teams-agent }
+          - { name: windows, os: windows-latest, bin: ms-teams-agent.exe }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - if: matrix.name == 'arch'
+        run: pacman -Syu --noconfirm --needed base-devel git rustup github-cli && rustup default stable
+      - uses: actions/checkout@v4
+      - if: matrix.name != 'arch'
+        uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ms-teams-agent-${{ matrix.name }}
+          path: target/release/${{ matrix.bin }}
+      - if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          cp target/release/${{ matrix.bin }} ms-teams-agent-${{ matrix.name }}${{ matrix.name == 'windows' && '.exe' || '' }}
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes 2>/dev/null || true
+          gh release upload "$GITHUB_REF_NAME" ms-teams-agent-${{ matrix.name }}* --repo "$GITHUB_REPOSITORY" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
