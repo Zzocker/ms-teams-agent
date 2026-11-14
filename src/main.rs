@@ -5,10 +5,12 @@ mod teams;
 
 use auth::Session;
 use rune::tok::{self, type_};
-use rune::{Align, AppSpec, Cx, El, Side, Latest, ScrollSpec, TextEdit, Tx, Waker, auto_grow, col, el, row, text, text_input};
+use rune::{Align, AppSpec, Cx, El, Side, Drag, Latest, Live, Phase, ScrollPos, ScrollSpec, TextEdit, Tx, Waker, auto_grow, col, el, row, text, text_input};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::{Arc, mpsc};
-use teams::{Chat, Msg};
+use teams::{Chat, Msg, Page};
 
 enum Screen {
     Loading,
@@ -18,7 +20,7 @@ enum Screen {
     Main { session: Arc<Session>, chats: Vec<Chat> },
 }
 
-type Messages = Result<Vec<Msg>, String>;
+type Messages = Result<Page, String>;
 
 struct State {
     screen: Screen,
@@ -30,6 +32,8 @@ struct State {
     /// The selected chat's messages; `None` while they load.
     messages: Option<Messages>,
     loader: Latest<(String, Messages)>,
+    /// A fetch of the page before the loaded ones: the chat, the link it followed, the page.
+    older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
     draft: TextEdit,
     /// A send in flight: the chat, then its reloaded messages, or the error and the unsent text.
@@ -37,6 +41,9 @@ struct State {
     send_error: Option<String>,
     /// Filters the chat list by name.
     search: TextEdit,
+    /// Where the chat list's and the messages' scroll thumbs are drawn.
+    chat_bar: Bar,
+    msg_bar: Bar,
 }
 
 fn init() -> State {
@@ -48,10 +55,13 @@ fn init() -> State {
         selected: None,
         messages: None,
         loader: Latest::default(),
+        older_loader: Latest::default(),
         draft: TextEdit::new(""),
         sender: Latest::default(),
         send_error: None,
         search: TextEdit::new(""),
+        chat_bar: Bar::default(),
+        msg_bar: Bar::default(),
     }
 }
 
@@ -115,6 +125,20 @@ fn open_chat(s: &mut State, id: String) {
     });
 }
 
+/// Fetches the page before the loaded messages, when scrolling reaches the top of them.
+fn load_older(s: &mut State) {
+    let (Screen::Main { session, .. }, Some(id), Some(Ok(page))) = (&s.screen, &s.selected, &s.messages) else { return };
+    let Some(link) = page.older.clone() else { return };
+    if s.older_loader.is_pending() {
+        return;
+    }
+    let session = session.clone();
+    s.older_loader.request((id.clone(), link), move |(id, link)| {
+        let r = teams::older(&session, &link);
+        (id, link, r)
+    });
+}
+
 /// Sends the draft to the selected chat, then reloads its messages.
 fn send(s: &mut State) {
     let (Screen::Main { session, .. }, Some(id)) = (&s.screen, &s.selected) else { return };
@@ -139,6 +163,7 @@ fn send(s: &mut State) {
 fn setup(s: &mut State, waker: Waker) {
     s.loader.set_waker(waker.clone());
     s.sender.set_waker(waker.clone());
+    s.older_loader.set_waker(waker.clone());
     s.waker = Some(waker);
     // The app has no arguments of its own; any argument is Rune's headless tooling, which gets no network.
     if std::env::args().len() == 1 {
@@ -164,6 +189,20 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             changed = true;
         }
     }
+    if let Some((id, link, r)) = s.older_loader.take() {
+        // Only onto the page it was asked for: a reload meanwhile has its own cursor.
+        if let (true, Some(Ok(page)), Ok(old)) = (s.selected.as_ref() == Some(&id), s.messages.as_mut(), r) {
+            if page.older.as_deref() == Some(&link) {
+                // The anchor lets go mid-scroll and at the very top, which is when pages land; pin the old first row.
+                if let Some(first) = page.msgs.first() {
+                    tx.keep_on_screen(format!("msg/{}", first.time));
+                }
+                page.msgs.splice(0..0, old.msgs);
+                page.older = old.older;
+                changed = true;
+            }
+        }
+    }
     if let Some((id, r)) = s.sender.take() {
         let here = s.selected.as_ref() == Some(&id);
         match r {
@@ -180,6 +219,66 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         changed = true;
     }
     changed
+}
+
+/// A scroll bar's thumb, where it's drawn, and where its viewport was last scrolled to, for dragging.
+#[derive(Clone)]
+struct Bar {
+    rect: Live<[f32; 4]>,
+    at: Rc<Cell<ScrollPos>>,
+}
+
+impl Default for Bar {
+    fn default() -> Self {
+        Bar { rect: Live::new([0.0; 4]), at: Rc::default() }
+    }
+}
+
+/// The scroll viewport keyed `key`, with a draggable bar over its right edge: Rune at this
+/// revision draws no scroll bars. `list` must grow to fill its parent, as a scrolling column does.
+fn with_bar(key: &'static str, list: El, bar: &Bar) -> El {
+    let b = bar.clone();
+    let list = list.key(key).on_scroll_offset(move |at: ScrollPos| {
+        b.at.set(at);
+        b.rect.snap(thumb(at));
+    });
+    let at = bar.at.clone();
+    // The track, not the thumb, takes the drag: wider to hit, and a press off the thumb jumps there.
+    let track = el().pin(None, Some(0.0), Some(0.0), Some(0.0)).w(12.0)
+        .on_drag_any(move |d: &mut Drag, tx: &mut Tx| {
+            let now = at.get();
+            let [_, top, _, h] = thumb(now);
+            if h == 0.0 {
+                return;
+            }
+            if d.phase == Phase::Down {
+                // Hold the thumb where it was grabbed; off it, grab its middle.
+                d.data = if (top..top + h).contains(&d.y) { d.y - top } else { h / 2.0 };
+            }
+            tx.scroll_to_y(key, offset_at(now, d.y - d.data));
+        });
+    col().w_full().grow(1.0).min_h(0.0)
+        .child(list)
+        .child(el().absolute(0.0, 0.0).radius(2.0).fill(tok::theme(true).text_secondary.alpha(0.5)).live_rect(&bar.rect))
+        .child(track)
+}
+
+/// The scroll offset that puts the thumb's top at `top`; what [`thumb`] undoes.
+fn offset_at(at: ScrollPos, top: f32) -> f32 {
+    let [_, _, _, h] = thumb(at);
+    let room = at.viewport[1] - 4.0 - h;
+    if room <= 0.0 { 0.0 } else { ((top - 2.0) / room).clamp(0.0, 1.0) * at.max[1] }
+}
+
+/// The thumb's `[x, y, w, h]` in the viewport: as tall as the share of the content in view, at least 24pt; none when nothing scrolls.
+fn thumb(at: ScrollPos) -> [f32; 4] {
+    let ([w, vh], max, y) = (at.viewport, at.max[1], at.offset[1]);
+    if max <= 0.5 {
+        return [0.0; 4];
+    }
+    let track = vh - 4.0;
+    let h = (track * vh / (vh + max)).clamp(24.0_f32.min(track), track);
+    [w - 6.0, 2.0 + (y / max).clamp(0.0, 1.0) * (track - h), 4.0, h]
 }
 
 fn button(key: &'static str, label: &'static str, primary: bool, on_press: fn(&mut State)) -> El {
@@ -256,8 +355,8 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 .placeholder("Search", t.text_secondary)
                 .caret(t.text, tok::accent(0, true).alpha(0.3))
                 .on_edit(|s: &mut State| &mut s.search)));
-    let list = col().key("chats").w_full().gap(2.0).padding(6.0).children(rows)
-        .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0);
+    let list = with_bar("chats", col().w_full().gap(2.0).padding(6.0).children(rows)
+        .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0), &s.chat_bar);
     let sidebar = col().w(300.0).h_full().min_h(0.0).fill(t.card).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
         .child(header).child(list);
 
@@ -266,7 +365,10 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         (None, _) => pane.center().child(note(if chats.is_empty() { "No chats yet." } else { "Pick a chat." })),
         (Some(_), None) => pane.center().child(note("Loading messages…")),
         (Some(_), Some(Err(e))) => pane.center().padding(32.0).child(note(e).wrap()),
-        (Some(id), Some(Ok(msgs))) => {
+        (Some(id), Some(Ok(page))) => {
+            let msgs = &page.msgs;
+            // Fetch older a screenful before the top, so it's usually in before the scroll gets there.
+            let edge = if page.older.is_some() { Some(15.min(msgs.len().saturating_sub(1))) } else { None };
             let title = chats.iter().find(|c| &c.id == id).map_or("Chat", |c| c.title.as_str());
             let bubbles = msgs.iter().enumerate().flat_map(|(i, m)| {
                 let prev = i.checked_sub(1).map(|j| &msgs[j]);
@@ -280,6 +382,11 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 // Keyed by time, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
                 // shortcut: two messages with the same composetime share a key, switch to the message id then.
                 let line = row().key(format!("msg/{}", m.time)).w_full().gap(8.0).mt(if head { 10.0 } else { 0.0 });
+                let line = if edge == Some(i) {
+                    line.on_visible(|s: &mut State, on, _| if on { load_older(s) })
+                } else {
+                    line
+                };
                 let line = if m.mine {
                     line.justify_end().items_end().child(time).child(bubble)
                 } else {
@@ -295,10 +402,10 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             pane.child(row().w_full().gap(10.0).px(16.0).py(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
                     .child(avatar(title, 32.0))
                     .child(text(title).font(type_::TITLE).color(t.text).truncate()))
-                .child(col().key("messages").w_full().gap(4.0).px(16.0).py(8.0)
+                .child(with_bar("messages", col().w_full().gap(4.0).px(16.0).py(8.0)
                     .children(bubbles)
                     .children(msgs.is_empty().then(|| note("No messages.")))
-                    .scroll(ScrollSpec { stick_bottom: true }).grow(1.0).min_h(0.0))
+                    .scroll(ScrollSpec { stick_bottom: true }).scroll_anchor().grow(1.0).min_h(0.0), &s.msg_bar))
                 .child(col().w_full().gap(6.0).px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
                     .children(s.send_error.as_deref().map(|e| note(e).wrap()))
                     .child(row().w_full().gap(8.0).items_end()
@@ -355,11 +462,11 @@ fn demo(s: &mut State) {
         ],
     };
     s.selected = Some("a".into());
-    s.messages = Some(Ok(vec![
+    s.messages = Some(Ok(Page { older: None, msgs: vec![
         msg("Charles Babbage", "Did you get a chance to look at the notes?", "2026-11-14T10:20:00Z", false),
         msg("Ada Lovelace", "Yes. Note G is done: it computes the Bernoulli numbers.\nI'll send it tonight.", "2026-11-14T10:24:00Z", true),
         msg("Charles Babbage", "The engine needs another column of gears, I think", "2026-11-14T10:31:00Z", false),
-    ]));
+    ] }));
 }
 
 fn main() {
@@ -383,4 +490,25 @@ fn main() {
         min_size: Some((640.0, 400.0)),
         ..AppSpec::new("Teams", (1000.0, 680.0), init, view)
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumb_tracks_offset() {
+        let mut at = ScrollPos::default();
+        at.viewport = [300.0, 400.0];
+        assert_eq!(thumb(at), [0.0; 4], "nothing to scroll");
+        at.max[1] = 400.0; // content twice the viewport: thumb is half the track
+        assert_eq!(thumb(at), [294.0, 2.0, 4.0, 198.0]);
+        at.offset[1] = 400.0;
+        assert_eq!(thumb(at), [294.0, 200.0, 4.0, 198.0]);
+        assert_eq!(offset_at(at, 200.0), 400.0, "inverse of thumb");
+        assert_eq!(offset_at(at, 2.0), 0.0);
+        assert_eq!(offset_at(at, -50.0), 0.0, "dragged past the top");
+        at.max[1] = 1e6; // long content: thumb keeps its minimum
+        assert_eq!(thumb(at)[3], 24.0);
+    }
 }

@@ -122,9 +122,29 @@ fn peer<'a>(chat_id: &'a str, me: &str) -> Option<&'a str> {
     Some(if a == me { b } else { a })
 }
 
-pub fn messages(s: &Session, chat_id: &str) -> Result<Vec<Msg>, String> {
+/// A run of messages, oldest first, and the link to the page before it (`None` at the start of the chat).
+#[derive(Clone)]
+pub struct Page {
+    pub msgs: Vec<Msg>,
+    pub older: Option<String>,
+}
+
+pub fn messages(s: &Session, chat_id: &str) -> Result<Page, String> {
     let v = get(s, &format!("conversations/{}/messages?view=msnp24Equivalent&pageSize=50&startTime=1", encode(chat_id)))?;
-    Ok(parse_messages(&v, &s.user.id))
+    Ok(page(&v, &s.user.id))
+}
+
+/// The page `link` (a [`Page::older`]) points to.
+pub fn older(s: &Session, link: &str) -> Result<Page, String> {
+    // The link carries our token, so only follow it to the chat service.
+    if !link.starts_with(&s.chat_service) {
+        return Err("unexpected link for older messages".into());
+    }
+    Ok(page(&answer(agent().get(link).header("Authentication", &auth(s)).call())?, &s.user.id))
+}
+
+fn page(v: &Value, me: &str) -> Page {
+    Page { msgs: parse_messages(v, me), older: v["_metadata"]["backwardLink"].as_str().map(Into::into) }
 }
 
 /// The chat with yourself, which Teams shows as "Name (You)".
