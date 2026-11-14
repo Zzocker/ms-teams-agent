@@ -64,21 +64,30 @@ pub fn text_to_html(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\n', "<br>")
 }
 
+/// The chats with guessed titles; [`name_chats`] gives them their people's names.
 pub fn chats(s: &Session) -> Result<Vec<Chat>, String> {
-    let mut chats = parse_chats(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user);
+    Ok(parse_chats(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user))
+}
+
+/// Names chats after their people. Slow (a request per untitled group chat), so done after the list shows.
+pub fn name_chats(s: &Session, mut chats: Vec<Chat>) -> Vec<Chat> {
     let me = format!("8:orgid:{}", s.user.id);
     // Chats carry no names. Who each is named after: a 1:1's other person (in its id), or the
     // members of a group chat without a topic (a request each; there are few).
-    let people: Vec<Vec<String>> = chats.iter().map(|c| match peer(&c.id, &s.user.id) {
-        Some(p) => vec![format!("8:orgid:{p}")],
-        None if c.title == UNTITLED => members(s, &c.id).unwrap_or_default().into_iter().filter(|m| *m != me).collect(),
-        None => vec![],
-    }).collect();
+    // The member lookups run at once: one after another they add up.
+    let people: Vec<Vec<String>> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = chats.iter().map(|c| match peer(&c.id, &s.user.id) {
+            Some(p) => Ok(vec![format!("8:orgid:{p}")]),
+            None if c.title == UNTITLED => Err(scope.spawn(|| members(s, &c.id).unwrap_or_default().into_iter().filter(|m| *m != me).collect())),
+            None => Ok(vec![]),
+        }).collect();
+        jobs.into_iter().map(|j| j.unwrap_or_else(|h| h.join().unwrap_or_default())).collect()
+    });
     let mut all: Vec<&String> = people.iter().flatten().collect();
     all.sort();
     all.dedup();
     if all.is_empty() {
-        return Ok(chats);
+        return chats;
     }
     // A failed lookup isn't worth losing the chat list over: the guessed titles stay.
     let Ok(v) = answer(agent()
@@ -86,7 +95,7 @@ pub fn chats(s: &Session) -> Result<Vec<Chat>, String> {
         .header("Authorization", &format!("Bearer {}", s.access))
         .send_json(&all))
     else {
-        return Ok(chats);
+        return chats;
     };
     let empty = vec![];
     let profiles = v["value"].as_array().unwrap_or(&empty);
@@ -97,7 +106,7 @@ pub fn chats(s: &Session) -> Result<Vec<Chat>, String> {
             c.title = names.join(", ");
         }
     }
-    Ok(chats)
+    chats
 }
 
 /// A chat's members' ids, e.g. `8:orgid:{oid}`.

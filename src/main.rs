@@ -35,6 +35,8 @@ struct State {
     /// A send in flight: the chat, then its reloaded messages, or the error and the unsent text.
     sender: Latest<(String, Result<Messages, (String, String)>)>,
     send_error: Option<String>,
+    /// Filters the chat list by name.
+    search: TextEdit,
 }
 
 fn init() -> State {
@@ -49,6 +51,7 @@ fn init() -> State {
         draft: TextEdit::new(""),
         sender: Latest::default(),
         send_error: None,
+        search: TextEdit::new(""),
     }
 }
 
@@ -73,11 +76,15 @@ fn sign_in(s: &mut State, interactive: bool) {
             }
             r => r,
         };
-        emit(match session.and_then(|s| s.map(|s| teams::chats(&s).map(|chats| (s, chats))).transpose()) {
-            Ok(Some((session, chats))) => Screen::Main { session: Arc::new(session), chats },
-            Ok(None) => Screen::Login(None),
-            Err(e) => Screen::Login(Some(e)),
-        });
+        match session.and_then(|s| s.map(|s| teams::chats(&s).map(|chats| (s, chats))).transpose()) {
+            Ok(Some((session, chats))) => {
+                let session = Arc::new(session);
+                emit(Screen::Main { session: session.clone(), chats: chats.clone() });
+                emit(Screen::Main { chats: teams::name_chats(&session, chats), session });
+            }
+            Ok(None) => emit(Screen::Login(None)),
+            Err(e) => emit(Screen::Login(Some(e))),
+        }
     });
 }
 
@@ -86,6 +93,7 @@ fn sign_out(s: &mut State) {
     s.loader.cancel();
     s.sender.cancel();
     s.draft.clear();
+    s.search.clear();
     s.send_error = None;
     auth::sign_out();
     (s.selected, s.messages) = (None, None);
@@ -212,7 +220,8 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         .child(el().key("sign-out").role("button").label("Sign out").focusable(true).px(10.0).py(6.0).radius(6.0)
             .fill(t.control_off).hover(t.hover).on_press(sign_out)
             .child(text("Sign out").font(type_::LABEL).color(t.text)));
-    let rows = chats.iter().map(|c| {
+    let query = s.search.text.trim().to_lowercase();
+    let rows = chats.iter().filter(|c| c.title.to_lowercase().contains(&query)).map(|c| {
         let id = c.id.clone();
         let picked = s.selected.as_ref() == Some(&c.id);
         row().key(format!("chat/{}", c.id)).role("button").label(c.title.as_str()).focusable(true)
@@ -226,10 +235,15 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .child(note(&short_time(&c.time)).font(type_::LABEL)))
                 .child(note(&c.preview).truncate()))
     });
+    let search = col().mx(10.0).mt(10.0).px(12.0).py(8.0).radius(8.0).fill(t.bg)
+        .child(text_input(&s.search, type_::BODY).key("search").label("Search chats").color(t.text)
+            .placeholder("Search chats", t.text_secondary)
+            .caret(t.text, tok::accent(0, true).alpha(0.3))
+            .on_edit(|s: &mut State| &mut s.search));
     let list = col().key("chats").w_full().gap(2.0).padding(6.0).children(rows)
         .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0);
     let sidebar = col().w(300.0).h_full().min_h(0.0).fill(t.card).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
-        .child(header).child(list);
+        .child(header).child(search).child(list);
 
     let pane = col().grow(1.0).shrink().h_full().min_w(0.0).min_h(0.0).fill(t.bg);
     let pane = match (&s.selected, &s.messages) {
@@ -335,6 +349,10 @@ fn main() {
             ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
             ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
             ("main", demo),
+            ("search", |s| {
+                demo(s);
+                s.search = TextEdit::new("char");
+            }),
             ("pick", |s| {
                 demo(s);
                 (s.selected, s.messages) = (None, None);

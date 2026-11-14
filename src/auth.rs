@@ -59,9 +59,11 @@ pub fn parse_token(v: &Value) -> Result<Token, String> {
     }
 }
 
+/// One agent for the app, so requests reuse its pooled connections instead of a TLS handshake each.
 pub(crate) fn agent() -> ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     // 4xx carries the error JSON we need to read, so it isn't an Err.
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into()
+    AGENT.get_or_init(|| ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into()).clone()
 }
 
 fn client_id() -> String {
