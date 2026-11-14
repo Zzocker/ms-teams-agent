@@ -5,7 +5,7 @@ mod teams;
 
 use auth::Session;
 use rune::tok::{self, type_};
-use rune::{AppSpec, Cx, El, Latest, ScrollSpec, TextEdit, Tx, Waker, auto_grow, col, el, row, text, text_input};
+use rune::{Align, AppSpec, Cx, El, Side, Latest, ScrollSpec, TextEdit, Tx, Waker, auto_grow, col, el, row, text, text_input};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, mpsc};
 use teams::{Chat, Msg};
@@ -220,30 +220,46 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         .child(el().key("sign-out").role("button").label("Sign out").focusable(true).px(10.0).py(6.0).radius(6.0)
             .fill(t.control_off).hover(t.hover).on_press(sign_out)
             .child(text("Sign out").font(type_::LABEL).color(t.text)));
-    let query = s.search.text.trim().to_lowercase();
-    let rows = chats.iter().filter(|c| c.title.to_lowercase().contains(&query)).map(|c| {
+    let chat_row = |c: &Chat, key: &str| {
         let id = c.id.clone();
         let picked = s.selected.as_ref() == Some(&c.id);
-        row().key(format!("chat/{}", c.id)).role("button").label(c.title.as_str()).focusable(true)
+        row().key(format!("{key}/{}", c.id)).role("button").label(c.title.as_str()).focusable(true)
             .w_full().gap(10.0).px(10.0).py(8.0).radius(8.0).items_center()
             .fill(if picked { t.press } else { t.card }).hover(t.hover)
-            .on_press(move |s: &mut State| open_chat(s, id.clone()))
+            .on_press(move |s: &mut State| {
+                s.search.clear();
+                open_chat(s, id.clone());
+            })
             .child(avatar(&c.title, 36.0))
             .child(col().gap(2.0).grow(1.0).min_w(0.0)
                 .child(row().w_full().gap(8.0)
                     .child(text(c.title.as_str()).font(type_::TITLE).color(t.text).truncate().grow(1.0).min_w(0.0))
                     .child(note(&short_time(&c.time)).font(type_::LABEL)))
                 .child(note(&c.preview).truncate()))
+    };
+    let rows = chats.iter().map(|c| chat_row(c, "chat"));
+    // Results float under the search bar, over the chat list, like Teams.
+    let query = s.search.text.trim().to_lowercase();
+    let results = (!query.is_empty()).then(|| {
+        let hits: Vec<El> = chats.iter().filter(|c| c.title.to_lowercase().contains(&query)).map(|c| chat_row(c, "hit")).collect();
+        col().key("results").w(560.0).max_h(480.0).shrink().min_h(0.0).padding(6.0).gap(2.0).radius(8.0).fill(t.card)
+            .border(1.0, t.separator)
+            .anchored_fit("search-box", Side::Bottom, Align::Start, 4.0)
+            .child(note("Chats").font(type_::LABEL).px(10.0).py(4.0))
+            .children(hits.is_empty().then(|| note("No matches.").px(10.0).py(8.0)))
+            .child(col().w_full().gap(2.0).children(hits).scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0))
     });
-    let search = col().mx(10.0).mt(10.0).px(12.0).py(8.0).radius(8.0).fill(t.bg)
-        .child(text_input(&s.search, type_::BODY).key("search").label("Search chats").color(t.text)
-            .placeholder("Search chats", t.text_secondary)
-            .caret(t.text, tok::accent(0, true).alpha(0.3))
-            .on_edit(|s: &mut State| &mut s.search));
+    // Top bar, not the sidebar: search will cover messages too, not just chat names.
+    let search = row().w_full().justify_center().px(16.0).py(8.0).fill(t.card).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+        .child(col().key("search-box").w_full().max_w(560.0).shrink().px(12.0).py(6.0).radius(8.0).fill(t.bg)
+            .child(text_input(&s.search, type_::BODY).key("search").label("Search").color(t.text)
+                .placeholder("Search", t.text_secondary)
+                .caret(t.text, tok::accent(0, true).alpha(0.3))
+                .on_edit(|s: &mut State| &mut s.search)));
     let list = col().key("chats").w_full().gap(2.0).padding(6.0).children(rows)
         .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0);
     let sidebar = col().w(300.0).h_full().min_h(0.0).fill(t.card).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
-        .child(header).child(search).child(list);
+        .child(header).child(list);
 
     let pane = col().grow(1.0).shrink().h_full().min_w(0.0).min_h(0.0).fill(t.bg);
     let pane = match (&s.selected, &s.messages) {
@@ -293,7 +309,9 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                         .child(button("send", "Send", true, send))))
         }
     };
-    row().w_full().h_full().fill(t.bg).child(sidebar).child(pane)
+    col().w_full().h_full().fill(t.bg).child(search)
+        .child(row().w_full().grow(1.0).min_h(0.0).child(sidebar).child(pane))
+        .children(results)
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
