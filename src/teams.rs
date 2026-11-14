@@ -1,6 +1,6 @@
 //! Teams' private chat service (undocumented; the Teams web client's own API): chats and their messages.
 
-use crate::auth::{Session, agent};
+use crate::auth::{Session, User, agent};
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,12 +20,16 @@ pub struct Msg {
     pub mine: bool,
 }
 
-fn get(s: &Session, path: &str) -> Result<Value, String> {
-    let mut res = agent()
-        .get(&format!("{}/v1/users/ME/{path}", s.chat_service))
-        .header("Authentication", &format!("skypetoken={}", s.skype_token))
-        .call()
-        .map_err(|e| e.to_string())?;
+fn url(s: &Session, path: &str) -> String {
+    format!("{}/v1/users/ME/{path}", s.chat_service)
+}
+
+fn auth(s: &Session) -> String {
+    format!("skypetoken={}", s.skype_token)
+}
+
+fn answer(res: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Value, String> {
+    let mut res = res.map_err(|e| e.to_string())?;
     let status = res.status();
     if status == 401 {
         return Err("Teams session expired; restart the app.".into());
@@ -37,8 +41,31 @@ fn get(s: &Session, path: &str) -> Result<Value, String> {
     Ok(v)
 }
 
+fn get(s: &Session, path: &str) -> Result<Value, String> {
+    answer(agent().get(&url(s, path)).header("Authentication", &auth(s)).call())
+}
+
+/// Sends `text` to a chat as the signed-in user.
+pub fn send(s: &Session, chat_id: &str, text: &str) -> Result<(), String> {
+    // The service drops a repeat of a client message id, so it must differ per message.
+    let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let body = serde_json::json!({
+        "content": text_to_html(text),
+        "messagetype": "RichText/Html",
+        "contenttype": "text",
+        "clientmessageid": id.to_string(),
+        "imdisplayname": s.user.name,
+    });
+    answer(agent().post(&url(s, &format!("conversations/{}/messages", encode(chat_id)))).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
+}
+
+/// Plain text as the HTML a Teams message carries; what [`html_to_text`] undoes.
+pub fn text_to_html(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\n', "<br>")
+}
+
 pub fn chats(s: &Session) -> Result<Vec<Chat>, String> {
-    Ok(parse_chats(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user.id))
+    Ok(parse_chats(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user))
 }
 
 pub fn messages(s: &Session, chat_id: &str) -> Result<Vec<Msg>, String> {
@@ -46,22 +73,28 @@ pub fn messages(s: &Session, chat_id: &str) -> Result<Vec<Msg>, String> {
     Ok(parse_messages(&v, &s.user.id))
 }
 
-pub fn parse_chats(v: &Value, me: &str) -> Vec<Chat> {
+/// The chat with yourself, which Teams shows as "Name (You)".
+const NOTES: &str = "48:notes";
+
+pub fn parse_chats(v: &Value, me: &User) -> Vec<Chat> {
     let empty = vec![];
     let mut chats: Vec<Chat> = v["conversations"].as_array().unwrap_or(&empty).iter()
         .filter(|c| {
             let id = c["id"].as_str().unwrap_or("");
-            // 48: are system threads (notifications, call log, drafts); space/topic are team channels.
-            !id.is_empty() && !id.starts_with("48:") && !matches!(c["threadProperties"]["threadType"].as_str(), Some("space" | "topic"))
+            // Other 48: ids are system threads (notifications, call log, drafts); space/topic are team channels.
+            !id.is_empty() && (id == NOTES || !id.starts_with("48:")) && !matches!(c["threadProperties"]["threadType"].as_str(), Some("space" | "topic"))
         })
         .map(|c| {
             let last = &c["lastMessage"];
             let topic = c["threadProperties"]["topic"].as_str().unwrap_or("").trim();
             let sender = last["imdisplayname"].as_str().unwrap_or("");
             // shortcut: an untitled chat is named after its last sender who isn't me; the proper name needs a member lookup per chat.
-            let title = if !topic.is_empty() {
+            let you = format!("{} (You)", me.name);
+            let title = if c["id"] == NOTES {
+                &you
+            } else if !topic.is_empty() {
                 topic
-            } else if !sender.is_empty() && !last["from"].as_str().unwrap_or("").ends_with(me) {
+            } else if !sender.is_empty() && !last["from"].as_str().unwrap_or("").ends_with(&me.id) {
                 sender
             } else {
                 "Chat"
@@ -141,14 +174,15 @@ mod tests {
     fn chats_skip_system_threads_and_channels_and_name_untitled_chats() {
         let v = json!({"conversations": [
             {"id": "48:notifications", "lastMessage": {}},
+            {"id": "48:notes", "lastMessage": {"imdisplayname": "Me", "composetime": "2026-11-12T00:00:00Z"}},
             {"id": "19:c@thread.tacv2", "threadProperties": {"threadType": "space"}, "lastMessage": {}},
             {"id": "19:a_b@unq.gbl.spaces", "lastMessage": {"imdisplayname": "Bob", "from": "https://x/contacts/8:orgid:bob",
                 "content": "<p>hi &amp; bye</p><p>second</p>", "composetime": "2026-11-14T10:00:00Z"}},
             {"id": "19:g@thread.v2", "threadProperties": {"topic": "Design"}, "lastMessage": {"composetime": "2026-11-14T11:00:00Z"}},
             {"id": "19:m_b@unq.gbl.spaces", "lastMessage": {"imdisplayname": "Me", "from": "https://x/contacts/8:orgid:me-oid", "composetime": "2026-11-13T00:00:00Z"}},
         ]});
-        let c = parse_chats(&v, "me-oid");
-        assert_eq!(c.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Design", "Bob", "Chat"]);
+        let c = parse_chats(&v, &User { name: "Me".into(), id: "me-oid".into(), ..User::default() });
+        assert_eq!(c.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Design", "Bob", "Chat", "Me (You)"]);
         assert_eq!(c[1].preview, "hi & bye");
     }
 
@@ -170,6 +204,9 @@ mod tests {
         assert_eq!(html_to_text("<p>a<br>b</p><p>c &lt;d&gt;</p>"), "a\nb\nc <d>");
         assert_eq!(html_to_text("<img src=\"x\">"), "");
         assert_eq!(html_to_text("plain &amp;lt;"), "plain &lt;");
+        let typed = "a <b> & c\nd &lt;";
+        assert_eq!(text_to_html(typed), "a &lt;b&gt; &amp; c<br>d &amp;lt;");
+        assert_eq!(html_to_text(&text_to_html(typed)), typed);
         assert_eq!(encode("19:a_b@unq.gbl.spaces"), "19%3Aa_b%40unq.gbl.spaces");
     }
 }

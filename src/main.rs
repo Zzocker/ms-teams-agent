@@ -5,7 +5,7 @@ mod teams;
 
 use auth::Session;
 use rune::tok::{self, type_};
-use rune::{AppSpec, Cx, El, Latest, ScrollSpec, Tx, Waker, col, el, row, text};
+use rune::{AppSpec, Cx, El, Latest, ScrollSpec, TextEdit, Tx, Waker, auto_grow, col, el, row, text, text_input};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, mpsc};
 use teams::{Chat, Msg};
@@ -30,6 +30,11 @@ struct State {
     /// The selected chat's messages; `None` while they load.
     messages: Option<Messages>,
     loader: Latest<(String, Messages)>,
+    /// The message being written to the selected chat.
+    draft: TextEdit,
+    /// A send in flight: the chat, then its reloaded messages, or the error and the unsent text.
+    sender: Latest<(String, Result<Messages, (String, String)>)>,
+    send_error: Option<String>,
 }
 
 fn init() -> State {
@@ -41,6 +46,9 @@ fn init() -> State {
         selected: None,
         messages: None,
         loader: Latest::default(),
+        draft: TextEdit::new(""),
+        sender: Latest::default(),
+        send_error: None,
     }
 }
 
@@ -76,6 +84,9 @@ fn sign_in(s: &mut State, interactive: bool) {
 fn sign_out(s: &mut State) {
     s.attempt.fetch_add(1, SeqCst);
     s.loader.cancel();
+    s.sender.cancel();
+    s.draft.clear();
+    s.send_error = None;
     auth::sign_out();
     (s.selected, s.messages) = (None, None);
     s.screen = Screen::Login(None);
@@ -84,6 +95,11 @@ fn sign_out(s: &mut State) {
 fn open_chat(s: &mut State, id: String) {
     let Screen::Main { session, .. } = &s.screen else { return };
     let session = session.clone();
+    if s.selected.as_ref() != Some(&id) {
+        // A draft belongs to the chat it was written in; it must not follow to another one.
+        s.draft.clear();
+        s.send_error = None;
+    }
     (s.selected, s.messages) = (Some(id.clone()), None);
     s.loader.request(id, move |id| {
         let r = teams::messages(&session, &id);
@@ -91,8 +107,30 @@ fn open_chat(s: &mut State, id: String) {
     });
 }
 
+/// Sends the draft to the selected chat, then reloads its messages.
+fn send(s: &mut State) {
+    let (Screen::Main { session, .. }, Some(id)) = (&s.screen, &s.selected) else { return };
+    let text = s.draft.text.trim().to_string();
+    // One send at a time: `Latest` would drop the first one's answer.
+    if text.is_empty() || s.sender.is_pending() {
+        return;
+    }
+    let session = session.clone();
+    let id = id.clone();
+    s.draft.clear();
+    s.send_error = None;
+    s.sender.request((id, text), move |(id, text)| {
+        let r = match teams::send(&session, &id, &text) {
+            Ok(()) => Ok(teams::messages(&session, &id)),
+            Err(e) => Err((e, text)),
+        };
+        (id, r)
+    });
+}
+
 fn setup(s: &mut State, waker: Waker) {
     s.loader.set_waker(waker.clone());
+    s.sender.set_waker(waker.clone());
     s.waker = Some(waker);
     // The app has no arguments of its own; any argument is Rune's headless tooling, which gets no network.
     if std::env::args().len() == 1 {
@@ -117,6 +155,21 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             s.messages = Some(r);
             changed = true;
         }
+    }
+    if let Some((id, r)) = s.sender.take() {
+        let here = s.selected.as_ref() == Some(&id);
+        match r {
+            Ok(msgs) if here => s.messages = Some(msgs),
+            Ok(_) => {}
+            Err((e, text)) => {
+                s.send_error = Some(format!("Not sent: {e}"));
+                // Give the text back, unless the user moved on to another chat or draft.
+                if here && s.draft.text.is_empty() {
+                    s.draft.replace_text(text);
+                }
+            }
+        }
+        changed = true;
     }
     changed
 }
@@ -214,6 +267,16 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .children(bubbles)
                     .children(msgs.is_empty().then(|| note("No messages.")))
                     .scroll(ScrollSpec { stick_bottom: true }).grow(1.0).min_h(0.0))
+                .child(col().w_full().gap(6.0).px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
+                    .children(s.send_error.as_deref().map(|e| note(e).wrap()))
+                    .child(row().w_full().gap(8.0).items_end()
+                        .child(col().grow(1.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
+                            .child(auto_grow(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
+                                .placeholder("Type a message", t.text_secondary)
+                                .caret(t.text, tok::accent(0, true).alpha(0.3))
+                                .on_edit(|s: &mut State| &mut s.draft)
+                                .on_submit(|s: &mut State, _| send(s)), 1, 6)))
+                        .child(button("send", "Send", true, send))))
         }
     };
     row().w_full().h_full().fill(t.bg).child(sidebar).child(pane)
