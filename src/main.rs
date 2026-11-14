@@ -277,7 +277,9 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 let bubble = col().max_w(520.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(12.0)
                     .fill(if m.mine { tok::accent(0, true).alpha(0.3) } else { t.card })
                     .child(text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true));
-                let line = row().key(format!("msg/{i}")).w_full().gap(8.0).mt(if head { 10.0 } else { 0.0 });
+                // Keyed by time, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
+                // shortcut: two messages with the same composetime share a key, switch to the message id then.
+                let line = row().key(format!("msg/{}", m.time)).w_full().gap(8.0).mt(if head { 10.0 } else { 0.0 });
                 let line = if m.mine {
                     line.justify_end().items_end().child(time).child(bubble)
                 } else {
@@ -286,7 +288,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             .children(head.then(|| text(m.sender.as_str()).font(type_::LABEL).color(t.text_secondary)))
                             .child(row().gap(8.0).shrink().min_w(0.0).items_end().child(bubble).child(time)))
                 };
-                let divider = new_day.then(|| row().key(format!("day/{i}")).w_full().justify_center().mt(10.0)
+                let divider = new_day.then(|| row().key(format!("day/{}", m.time)).w_full().justify_center().mt(10.0)
                     .child(note(day(&m.time)).font(type_::LABEL)));
                 divider.into_iter().chain([line])
             });
