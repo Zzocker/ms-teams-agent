@@ -564,6 +564,7 @@ pub fn html_to_rich(html: &str) -> (String, Vec<(Range<usize>, String)>) {
     let mut out = String::new();
     let mut links = Vec::new();
     let mut open: Option<(usize, String)> = None;
+    let mut pre = false;
     let mut rest = html;
     while let Some(i) = rest.find('<') {
         // Newlines between tags are source formatting, not content; keeping them doubles every line break.
@@ -573,7 +574,11 @@ pub fn html_to_rich(html: &str) -> (String, Vec<(Range<usize>, String)>) {
         let Some(j) = rest[i..].find('>') else { break };
         let inner = &rest[i + 1..i + j];
         let tag = inner.trim_start_matches('/').split([' ', '/']).next().unwrap_or("").to_ascii_lowercase();
-        if matches!(tag.as_str(), "br" | "p" | "div" | "li" | "tr") && !out.ends_with('\n') {
+        if tag == "pre" {
+            pre = !inner.starts_with('/');
+        }
+        // In a code block every <br> is a line, so blank lines between sections stay.
+        if matches!(tag.as_str(), "br" | "p" | "div" | "li" | "tr") && (!out.ends_with('\n') || pre && tag == "br") {
             out.push('\n');
         }
         if tag == "a" {
@@ -836,6 +841,7 @@ mod tests {
         assert_eq!(html_to_text("<p>a<br>b</p><p>c &lt;d&gt;</p>"), "a\nb\nc <d>");
         assert_eq!(html_to_text("<img src=\"x\">"), "");
         assert_eq!(html_to_text("plain &amp;lt;"), "plain &lt;");
+        assert_eq!(html_to_text("<p>a<br><br>b</p><pre><code>c<br><br>d</code></pre>"), "a\nb\nc\n\nd");
         let typed = "a <b> & c\nd &lt;";
         assert_eq!(text_to_html(typed), "a &lt;b&gt; &amp; c<br>d &amp;lt;");
         assert_eq!(html_to_text(&text_to_html(typed)), typed);

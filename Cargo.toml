@@ -8,11 +8,14 @@ rune = { git = "https://github.com/anomalyco/rune", rev = "f1f54ce8bf485ee3a9580
 serde_json = "1"
 ureq = { version = "3", features = ["json"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 
 [features]
-default = ["image"]
+default = ["image", "markdown"]
 # Show pictures in messages (pasted screenshots, image files). Off: they show as "[image]".
 image = []
+# Format Markdown in messages (bold, italic, code, lists, headings). Off: shown as typed.
+markdown = ["dep:pulldown-cmark"]
 
 # Rune's own patches; a dependency's [patch] doesn't reach us (rune README, "Depending on Rune").
 [patch.crates-io]

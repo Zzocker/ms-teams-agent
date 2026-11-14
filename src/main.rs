@@ -4,6 +4,8 @@ mod auth;
 mod avatars;
 #[cfg(feature = "image")]
 mod images;
+#[cfg(feature = "markdown")]
+mod markdown;
 mod teams;
 
 use auth::Session;
@@ -752,8 +754,26 @@ fn loading_messages() -> El {
 fn message_text(m: &Msg) -> El {
     let t = tok::theme(true);
     let link = tok::accent(0, true);
-    let spans = m.links.iter().map(|(r, _)| rune::Span::new(r.start, r.end).color(link)).collect();
-    m.links.iter().fold(rune::rich(m.text.as_str(), spans), |el, (r, url)| {
+    #[cfg(feature = "markdown")]
+    let (text, links, mut spans) = {
+        use markdown::Style;
+        let md = markdown::parse(&m.text);
+        let links: Vec<_> = m.links.iter().map(|(r, url)| (md.at(r.start)..md.at(r.end), url)).filter(|(r, _)| !r.is_empty()).collect();
+        let spans: Vec<_> = md.spans.iter().map(|(r, style)| {
+            let span = rune::Span::new(r.start, r.end);
+            match style {
+                Style::Bold | Style::Heading => span.bold(),
+                Style::Italic => span.italic(),
+                Style::Code => span.mono().bg(t.press, 2.0),
+                Style::Block => span.mono(),
+            }
+        }).collect();
+        (md.text, links, spans)
+    };
+    #[cfg(not(feature = "markdown"))]
+    let (text, links, mut spans) = (m.text.clone(), m.links.iter().map(|(r, url)| (r.clone(), url)).collect::<Vec<_>>(), vec![]);
+    spans.extend(links.iter().map(|(r, _)| rune::Span::new(r.start, r.end).color(link)));
+    links.iter().fold(rune::rich(text, spans), |el, (r, url)| {
         el.link(rune::Link::new(r.clone(), url.as_str()).hover(rune::LinkPaint::new().underline(link)).help(url.as_str()))
     })
         // Long URLs have no spaces to wrap at.
@@ -1100,6 +1120,13 @@ fn main() {
                     (page.msgs[0].text, page.msgs[0].links) = (text, links);
                 }
             }),
+            #[cfg(feature = "markdown")]
+            ("markdown", |s| {
+                demo(s);
+                if let Some(Ok(page)) = &mut s.messages {
+                    page.msgs[0].text = teams::html_to_text(r#"<pre class="language-markdown"><code>**Release&nbsp;checklist**<br><br>-&nbsp;Bump&nbsp;`version`&nbsp;in&nbsp;**Cargo.toml**<br>&nbsp;&nbsp;-&nbsp;then&nbsp;run&nbsp;*all*&nbsp;tests<br><br>```<br>cargo&nbsp;test&nbsp;--all-features<br>```<br><br>#&nbsp;Done</code></pre>"#);
+                }
+            }),
             #[cfg(feature = "image")]
             ("file", file_demo),
             #[cfg(feature = "image")]
@@ -1143,6 +1170,7 @@ fn main() {
         setup: Some(setup),
         poll: Some(poll),
         min_size: Some((640.0, 400.0)),
+        families: ("Inter", "ui-monospace"),
         ..AppSpec::new("Teams", (1000.0, 680.0), init, view)
     });
 }
