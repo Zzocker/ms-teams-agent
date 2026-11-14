@@ -65,7 +65,52 @@ pub fn text_to_html(text: &str) -> String {
 }
 
 pub fn chats(s: &Session) -> Result<Vec<Chat>, String> {
-    Ok(parse_chats(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user))
+    let mut chats = parse_chats(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user);
+    let me = format!("8:orgid:{}", s.user.id);
+    // Chats carry no names. Who each is named after: a 1:1's other person (in its id), or the
+    // members of a group chat without a topic (a request each; there are few).
+    let people: Vec<Vec<String>> = chats.iter().map(|c| match peer(&c.id, &s.user.id) {
+        Some(p) => vec![format!("8:orgid:{p}")],
+        None if c.title == UNTITLED => members(s, &c.id).unwrap_or_default().into_iter().filter(|m| *m != me).collect(),
+        None => vec![],
+    }).collect();
+    let mut all: Vec<&String> = people.iter().flatten().collect();
+    all.sort();
+    all.dedup();
+    if all.is_empty() {
+        return Ok(chats);
+    }
+    // A failed lookup isn't worth losing the chat list over: the guessed titles stay.
+    let Ok(v) = answer(agent()
+        .post(&format!("{}/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true", s.middle_tier))
+        .header("Authorization", &format!("Bearer {}", s.access))
+        .send_json(&all))
+    else {
+        return Ok(chats);
+    };
+    let empty = vec![];
+    let profiles = v["value"].as_array().unwrap_or(&empty);
+    let name = |mri: &str| profiles.iter().find(|p| p["mri"] == mri).and_then(|p| p["displayName"].as_str()).filter(|n| !n.is_empty());
+    for (c, people) in chats.iter_mut().zip(&people) {
+        let names: Vec<&str> = people.iter().filter_map(|p| name(p)).collect();
+        if !names.is_empty() {
+            c.title = names.join(", ");
+        }
+    }
+    Ok(chats)
+}
+
+/// A chat's members' ids, e.g. `8:orgid:{oid}`.
+fn members(s: &Session, chat_id: &str) -> Result<Vec<String>, String> {
+    let v = answer(agent().get(&format!("{}/v1/threads/{}?view=msnp24Equivalent", s.chat_service, encode(chat_id))).header("Authentication", &auth(s)).call())?;
+    let empty = vec![];
+    Ok(v["members"].as_array().unwrap_or(&empty).iter().filter_map(|m| m["id"].as_str().map(String::from)).collect())
+}
+
+/// The other person's object id in a 1:1 chat, whose id is `19:{oid}_{oid}@unq.gbl.spaces`.
+fn peer<'a>(chat_id: &'a str, me: &str) -> Option<&'a str> {
+    let (a, b) = chat_id.strip_prefix("19:")?.strip_suffix("@unq.gbl.spaces")?.split_once('_')?;
+    Some(if a == me { b } else { a })
 }
 
 pub fn messages(s: &Session, chat_id: &str) -> Result<Vec<Msg>, String> {
@@ -75,6 +120,8 @@ pub fn messages(s: &Session, chat_id: &str) -> Result<Vec<Msg>, String> {
 
 /// The chat with yourself, which Teams shows as "Name (You)".
 const NOTES: &str = "48:notes";
+/// A chat with no topic and nobody else's last message to name it after.
+const UNTITLED: &str = "Chat";
 
 pub fn parse_chats(v: &Value, me: &User) -> Vec<Chat> {
     let empty = vec![];
@@ -97,7 +144,7 @@ pub fn parse_chats(v: &Value, me: &User) -> Vec<Chat> {
             } else if !sender.is_empty() && !last["from"].as_str().unwrap_or("").ends_with(&me.id) {
                 sender
             } else {
-                "Chat"
+                UNTITLED
             };
             Chat {
                 id: c["id"].as_str().unwrap_or("").into(),
@@ -184,6 +231,9 @@ mod tests {
         let c = parse_chats(&v, &User { name: "Me".into(), id: "me-oid".into(), ..User::default() });
         assert_eq!(c.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Design", "Bob", "Chat", "Me (You)"]);
         assert_eq!(c[1].preview, "hi & bye");
+        assert_eq!(peer("19:bob_me-oid@unq.gbl.spaces", "me-oid"), Some("bob"));
+        assert_eq!(peer("19:me-oid_bob@unq.gbl.spaces", "me-oid"), Some("bob"));
+        assert_eq!(peer("19:g@thread.v2", "me-oid"), None);
     }
 
     #[test]

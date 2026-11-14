@@ -25,6 +25,11 @@ pub struct Session {
     pub skype_token: String,
     /// The user's region's chat service, e.g. `https://apac.ng.msg.teams.microsoft.com`.
     pub chat_service: String,
+    /// `Authorization: Bearer …` for the middle tier (profiles).
+    // shortcut: lasts about an hour and isn't renewed; names of chats opened later may stay unresolved.
+    pub access: String,
+    /// The user's region's middle tier, e.g. `https://teams.microsoft.com/api/mt/apac`.
+    pub middle_tier: String,
 }
 
 /// What the token endpoint said.
@@ -117,7 +122,13 @@ fn session(access: &str) -> Result<Session, String> {
     let status = res.status();
     let v: Value = res.body_mut().read_json().map_err(|e| format!("Teams authz {status}: {e}"))?;
     match (v["tokens"]["skypeToken"].as_str(), v["regionGtms"]["chatService"].as_str()) {
-        (Some(t), Some(cs)) => Ok(Session { user, skype_token: t.into(), chat_service: cs.trim_end_matches('/').into() }),
+        (Some(t), Some(cs)) => Ok(Session {
+            user,
+            skype_token: t.into(),
+            chat_service: cs.trim_end_matches('/').into(),
+            access: access.into(),
+            middle_tier: v["regionGtms"]["middleTier"].as_str().unwrap_or("").trim_end_matches('/').into(),
+        }),
         _ => Err(format!("Teams authz {status}: {}", v["message"].as_str().or(v["errorCode"].as_str()).unwrap_or("no Teams token in the response"))),
     }
 }
