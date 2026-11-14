@@ -18,6 +18,7 @@ jobs:
           - { name: ubuntu, os: ubuntu-latest, bin: ms-teams-agent }
           - { name: arch, os: ubuntu-latest, container: "archlinux:latest", bin: ms-teams-agent }
           - { name: windows, os: windows-latest, bin: ms-teams-agent.exe }
+          - { name: macos, os: macos-latest, bin: ms-teams-agent }
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     steps:

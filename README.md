@@ -1,5 +1,8 @@
 # ms-teams-agent
 
+> [!WARNING]
+> Very early stage. Expect missing features, bugs and breaking changes.
+
 A lightweight Microsoft Teams client written in Rust (UI on [Rune](https://github.com/anomalyco/rune)).
 
 Easy for both people and agents to use: run it as a normal desktop app, or run it headless to render
@@ -28,6 +31,15 @@ chmod +x ms-teams-agent && ./ms-teams-agent
 ### Windows
 
 Unzip and run `ms-teams-agent.exe`. Building from source needs the MSVC toolchain (rustup's default).
+
+### macOS
+
+The build is for Apple Silicon and isn't signed, so clear the quarantine flag first:
+
+```sh
+xattr -d com.apple.quarantine ms-teams-agent
+chmod +x ms-teams-agent && ./ms-teams-agent
+```
 
 ## Use
 
