@@ -14,6 +14,9 @@ pub struct Chat {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Msg {
+    /// The client message id the sender gave it (the server's id if none), so a message
+    /// shown as it's sent keeps its identity when the server's copy replaces it.
+    pub id: String,
     pub sender: String,
     pub text: String,
     pub time: String,
@@ -46,17 +49,57 @@ fn get(s: &Session, path: &str) -> Result<Value, String> {
 }
 
 /// Sends `text` to a chat as the signed-in user.
-pub fn send(s: &Session, chat_id: &str, text: &str) -> Result<(), String> {
-    // The service drops a repeat of a client message id, so it must differ per message.
-    let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+/// `id` is from [`new_msg_id`].
+pub fn send(s: &Session, chat_id: &str, id: &str, text: &str) -> Result<(), String> {
     let body = serde_json::json!({
         "content": text_to_html(text),
         "messagetype": "RichText/Html",
         "contenttype": "text",
-        "clientmessageid": id.to_string(),
+        "clientmessageid": id,
         "imdisplayname": s.user.name,
     });
     answer(agent().post(&url(s, &format!("conversations/{}/messages", encode(chat_id)))).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
+}
+
+/// A fresh client message id. The service drops a repeat of one, so it must differ per message.
+pub fn new_msg_id() -> String {
+    // Nanoseconds: two sends in one millisecond still differ.
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()).to_string()
+}
+
+/// Now as the service writes `composetime`: `2026-11-14T10:23:45.123Z`.
+pub fn now() -> String {
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    iso(ms)
+}
+
+fn iso(ms: i64) -> String {
+    let (days, rem) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's days_from_civil, inverted).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (h, mi, s, milli) = (rem / 3_600_000, rem / 60_000 % 60, rem / 1000 % 60, rem % 1000);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{milli:03}Z")
+}
+
+/// `fresh` (the latest page) with the rows of `old` from before it kept above it, so a reload
+/// doesn't drop pages scrolled back to.
+pub fn merge(old: Page, fresh: Page) -> Page {
+    let Some(first) = fresh.msgs.first() else { return fresh };
+    let mut msgs: Vec<Msg> = old.msgs.into_iter()
+        .filter(|m| m.time < first.time && !fresh.msgs.iter().any(|f| f.id == m.id))
+        .collect();
+    // Kept rows reach back to `old`'s start, so its link is the one before them.
+    let older = if msgs.is_empty() { fresh.older } else { old.older };
+    msgs.extend(fresh.msgs);
+    Page { msgs, older }
 }
 
 /// Plain text as the HTML a Teams message carries; what [`html_to_text`] undoes.
@@ -199,6 +242,7 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
             }
             let text = html_to_text(raw);
             Some(Msg {
+                id: m["clientmessageid"].as_str().or(m["id"].as_str()).unwrap_or("").into(),
                 sender: m["imdisplayname"].as_str().unwrap_or("").into(),
                 text: if text.is_empty() { "[attachment]".into() } else { text },
                 time: m["composetime"].as_str().unwrap_or("").into(),
@@ -276,6 +320,23 @@ mod tests {
         ]});
         let m = parse_messages(&v, "me-oid");
         assert_eq!(m.iter().map(|m| (m.text.as_str(), m.mine)).collect::<Vec<_>>(), [("one", false), ("two", true)]);
+    }
+
+    #[test]
+    fn iso_dates() {
+        assert_eq!(iso(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso(1_794_673_185_538), "2026-11-14T16:19:45.538Z");
+        assert_eq!(iso(951_782_400_000), "2000-02-29T00:00:00.000Z");
+    }
+
+    #[test]
+    fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
+        let m = |id: &str, time: &str| Msg { id: id.into(), sender: String::new(), text: id.into(), time: time.into(), mine: false };
+        let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
+        let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
+        let p = merge(old, fresh);
+        assert_eq!(p.msgs.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "sent"]);
+        assert_eq!(p.older.as_deref(), Some("before-a"));
     }
 
     #[test]

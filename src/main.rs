@@ -5,7 +5,7 @@ mod teams;
 
 use auth::Session;
 use rune::tok::{self, type_};
-use rune::{Align, AppSpec, Cx, El, Side, Drag, Latest, Live, Phase, ScrollPos, ScrollSpec, TextEdit, Tx, Waker, auto_grow, col, el, row, text, text_input};
+use rune::{Align, AppSpec, Cx, El, GrowthSpec, Side, Drag, Latest, Live, Phase, ScrollPos, ScrollSpec, TextEdit, Tx, Waker, auto_grow, col, el, row, text, text_input};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -36,8 +36,8 @@ struct State {
     older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
     draft: TextEdit,
-    /// A send in flight: the chat, then its reloaded messages, or the error and the unsent text.
-    sender: Latest<(String, Result<Messages, (String, String)>)>,
+    /// A send in flight: the chat, the message's id, then its reloaded messages, or the error and the unsent text.
+    sender: Latest<(String, String, Result<Messages, (String, String)>)>,
     send_error: Option<String>,
     /// Filters the chat list by name.
     search: TextEdit,
@@ -139,7 +139,7 @@ fn load_older(s: &mut State) {
     });
 }
 
-/// Sends the draft to the selected chat, then reloads its messages.
+/// Shows the draft in the selected chat at once and sends it, then reloads its messages.
 fn send(s: &mut State) {
     let (Screen::Main { session, .. }, Some(id)) = (&s.screen, &s.selected) else { return };
     let text = s.draft.text.trim().to_string();
@@ -149,14 +149,19 @@ fn send(s: &mut State) {
     }
     let session = session.clone();
     let id = id.clone();
+    let msg_id = teams::new_msg_id();
+    if let Some(Ok(page)) = &mut s.messages {
+        // In this input's commit, so it glides in; the reload's copy shares its id and key.
+        page.msgs.push(Msg { id: msg_id.clone(), sender: session.user.name.clone(), text: text.clone(), time: teams::now(), mine: true });
+    }
     s.draft.clear();
     s.send_error = None;
-    s.sender.request((id, text), move |(id, text)| {
-        let r = match teams::send(&session, &id, &text) {
+    s.sender.request((id, msg_id, text), move |(id, msg_id, text)| {
+        let r = match teams::send(&session, &id, &msg_id, &text) {
             Ok(()) => Ok(teams::messages(&session, &id)),
             Err(e) => Err((e, text)),
         };
-        (id, r)
+        (id, msg_id, r)
     });
 }
 
@@ -195,7 +200,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             if page.older.as_deref() == Some(&link) {
                 // The anchor lets go mid-scroll and at the very top, which is when pages land; pin the old first row.
                 if let Some(first) = page.msgs.first() {
-                    tx.keep_on_screen(format!("msg/{}", first.time));
+                    tx.keep_on_screen(format!("msg/{}", first.id));
                 }
                 page.msgs.splice(0..0, old.msgs);
                 page.older = old.older;
@@ -203,12 +208,21 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             }
         }
     }
-    if let Some((id, r)) = s.sender.take() {
+    if let Some((id, msg_id, r)) = s.sender.take() {
         let here = s.selected.as_ref() == Some(&id);
         match r {
-            Ok(msgs) if here => s.messages = Some(msgs),
+            Ok(Ok(fresh)) if here => {
+                s.messages = Some(Ok(match s.messages.take() {
+                    Some(Ok(page)) => teams::merge(page, fresh),
+                    _ => fresh,
+                }));
+            }
+            Ok(fresh) if here => s.messages = Some(fresh),
             Ok(_) => {}
             Err((e, text)) => {
+                if let (true, Some(Ok(page))) = (here, &mut s.messages) {
+                    page.msgs.retain(|m| m.id != msg_id);
+                }
                 s.send_error = Some(format!("Not sent: {e}"));
                 // Give the text back, unless the user moved on to another chat or draft.
                 if here && s.draft.text.is_empty() {
@@ -379,9 +393,8 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 let bubble = col().max_w(520.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(12.0)
                     .fill(if m.mine { tok::accent(0, true).alpha(0.3) } else { t.card })
                     .child(text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true));
-                // Keyed by time, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
-                // shortcut: two messages with the same composetime share a key, switch to the message id then.
-                let line = row().key(format!("msg/{}", m.time)).w_full().gap(8.0).mt(if head { 10.0 } else { 0.0 });
+                // Keyed by id, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
+                let line = row().key(format!("msg/{}", m.id)).arrives_whole().w_full().gap(8.0).mt(if head { 10.0 } else { 0.0 });
                 let line = if edge == Some(i) {
                     line.on_visible(|s: &mut State, on, _| if on { load_older(s) })
                 } else {
@@ -395,16 +408,18 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             .children(head.then(|| text(m.sender.as_str()).font(type_::LABEL).color(t.text_secondary)))
                             .child(row().gap(8.0).shrink().min_w(0.0).items_end().child(bubble).child(time)))
                 };
-                let divider = new_day.then(|| row().key(format!("day/{}", m.time)).w_full().justify_center().mt(10.0)
+                let divider = new_day.then(|| row().key(format!("day/{}", m.id)).arrives_whole().w_full().justify_center().mt(10.0)
                     .child(note(day(&m.time)).font(type_::LABEL)));
                 divider.into_iter().chain([line])
             });
             pane.child(row().w_full().gap(10.0).px(16.0).py(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
                     .child(avatar(title, 32.0))
                     .child(text(title).font(type_::TITLE).color(t.text).truncate()))
-                .child(with_bar("messages", col().w_full().gap(4.0).px(16.0).py(8.0)
-                    .children(bubbles)
-                    .children(msgs.is_empty().then(|| note("No messages.")))
+                // A growth stack, so a sent message and the viewport following it glide in as one.
+                .child(with_bar("messages", col().w_full().px(16.0).py(8.0)
+                    .child(col().w_full().gap(4.0).growth(GrowthSpec::default())
+                        .children(bubbles)
+                        .children(msgs.is_empty().then(|| note("No messages."))))
                     .scroll(ScrollSpec { stick_bottom: true }).scroll_anchor().grow(1.0).min_h(0.0), &s.msg_bar))
                 .child(col().w_full().gap(6.0).px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
                     .children(s.send_error.as_deref().map(|e| note(e).wrap()))
@@ -449,7 +464,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 
 fn demo(s: &mut State) {
     let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), preview: preview.into(), time: time.into() };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { sender: sender.into(), text: text.into(), time: time.into(), mine };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), sender: sender.into(), text: text.into(), time: time.into(), mine };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
