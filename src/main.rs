@@ -399,14 +399,64 @@ fn button(key: &'static str, label: &'static str, primary: bool, on_press: fn(&m
         .child(text(label).font(type_::TITLE).color(t.text))
 }
 
-/// `2026-11-14T10:23:45.123Z` → `11-14 10:23`.
-// shortcut: shown in UTC; convert to local time when there's a time-zone source.
-fn short_time(iso: &str) -> String {
-    iso.get(5..16).unwrap_or(iso).replace('T', " ")
+fn local_time(iso: &str, format: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .map(|time| time.with_timezone(&chrono::Local).format(format).to_string())
+        .unwrap_or_else(|_| iso.to_owned())
 }
 
-fn day(iso: &str) -> &str {
-    iso.get(..10).unwrap_or(iso)
+fn message_date(iso: &str, today: chrono::NaiveDate) -> String {
+    let Ok(time) = chrono::DateTime::parse_from_rfc3339(iso) else {
+        return iso.to_owned();
+    };
+    let date = time.with_timezone(&chrono::Local).date_naive();
+    match (today - date).num_days() {
+        0 => "Today".into(),
+        1 => "Yesterday".into(),
+        2..=7 => date.format("%A").to_string(),
+        _ => date.format("%A, %B %-d").to_string(),
+    }
+}
+
+fn day(iso: &str) -> String {
+    local_time(iso, "%Y-%m-%d")
+}
+
+fn chat_time(iso: &str, now: chrono::DateTime<chrono::Local>) -> String {
+    let Ok(time) = chrono::DateTime::parse_from_rfc3339(iso) else {
+        return iso.to_owned();
+    };
+    let time = time.with_timezone(&chrono::Local);
+    let format = if time.date_naive() == now.date_naive() {
+        "%-I:%M %p"
+    } else {
+        "%-m/%-d"
+    };
+    time.format(format).to_string()
+}
+
+fn message_time(iso: &str, today: chrono::NaiveDate) -> String {
+    let Ok(time) = chrono::DateTime::parse_from_rfc3339(iso) else {
+        return iso.to_owned();
+    };
+    let time = time.with_timezone(&chrono::Local);
+    let date = if (0..=7).contains(&(today - time.date_naive()).num_days()) {
+        message_date(iso, today)
+    } else {
+        time.format("%-m/%-d").to_string()
+    };
+    format!("{date} {}", time.format("%-I:%M %p"))
+}
+
+fn same_message_group(previous: &Msg, current: &Msg) -> bool {
+    previous.sender == current.sender && previous.mine == current.mine
+        && day(&previous.time) == day(&current.time)
+        && chrono::DateTime::parse_from_rfc3339(&previous.time).ok()
+            .zip(chrono::DateTime::parse_from_rfc3339(&current.time).ok())
+            .is_some_and(|(before, after)| {
+                let gap = after - before;
+                gap >= chrono::Duration::zero() && gap < chrono::Duration::minutes(5)
+            })
 }
 
 /// A circle with the name's initials, coloured by the name so a person keeps their colour.
@@ -454,7 +504,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             .child(col().gap(2.0).grow(1.0).min_w(0.0)
                 .child(row().w_full().gap(8.0)
                     .child(text(c.title.as_str()).font(type_::TITLE).color(t.text).truncate().grow(1.0).min_w(0.0))
-                    .children((!c.time.is_empty()).then(|| note(&short_time(&c.time)).font(type_::LABEL))))
+                    .children((!c.time.is_empty()).then(|| note(&chat_time(&c.time, chrono::Local::now())).font(type_::LABEL))))
                 .children((!c.preview.is_empty()).then(|| note(&c.preview).truncate())))
     };
     let mut rows: Vec<El> = Vec::new();
@@ -573,9 +623,9 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             let bubbles = msgs.iter().enumerate().flat_map(|(i, m)| {
                 let prev = i.checked_sub(1).map(|j| &msgs[j]);
                 let new_day = prev.is_none_or(|p| day(&p.time) != day(&m.time));
-                // A run of messages from one sender shares one avatar and name.
-                let head = new_day || prev.is_some_and(|p| p.sender != m.sender || p.mine != m.mine);
-                let time = note(m.time.get(11..16).unwrap_or(&m.time)).font(type_::LABEL);
+                // Nearby messages from one sender share an avatar, name and timestamp.
+                let head = prev.is_none_or(|p| !same_message_group(p, m));
+                let time = note(&message_time(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL);
                 let bubble = col().max_w(520.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(12.0)
                     .fill(if m.mine { tok::accent(0, true).alpha(0.3) } else { t.card })
                     .border(2.0, tok::accent(0, true).alpha(if s.reply_highlight_on && s.reply_highlight.as_ref().is_some_and(|(id, _)| id == &m.id) { 1.0 } else { 0.0 }))
@@ -591,27 +641,30 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                                 s.reply_target = Some(target.clone());
                                 reveal_reply(s, tx);
                             })
-                            .child(note(&format!("{}  {}", reply.sender, if reply.time.is_empty() { String::new() } else { format!("{} UTC", reply.time.get(..16).unwrap_or(&reply.time).replace('T', " ")) })).font(type_::LABEL).wrap())
+                            .child(note(&format!("{}  {}", reply.sender, local_time(&reply.time, "%Y-%m-%d %I:%M %p"))).font(type_::LABEL).wrap())
                             .child(text(reply.text.as_str()).font(type_::BODY).color(t.text).wrap())
                     }))
                     .children((!m.text.is_empty()).then(|| text(m.text.as_str()).font(type_::BODY).color(t.text).wrap().selectable(true)));
                 // Keyed by id, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
-                let line = row().key(format!("msg/{}", m.id)).arrives_whole().w_full().gap(8.0).mt(if head { 10.0 } else { 0.0 });
+                let line = row().key(format!("msg/{}", m.id)).arrives_whole().w_full().gap(8.0).mt(if head { 20.0 } else { 0.0 });
                 let line = if edge == Some(i) {
                     line.on_visible(|s: &mut State, on, _| if on { load_older(s) })
                 } else {
                     line
                 };
+                let content = col().gap(4.0).shrink().min_w(0.0)
+                    .children(head.then(|| row().gap(8.0).items_center()
+                        .child(text(m.sender.as_str()).font(type_::LABEL).color(t.text_secondary))
+                        .child(time)))
+                    .child(bubble);
                 let line = if m.mine {
-                    line.justify_end().items_end().child(time).child(bubble)
+                    line.justify_end().items_end().child(content)
                 } else {
                     line.child(if head { avatar(&m.sender, 32.0) } else { el().w(32.0) })
-                        .child(col().gap(4.0).grow(1.0).shrink().min_w(0.0)
-                            .children(head.then(|| text(m.sender.as_str()).font(type_::LABEL).color(t.text_secondary)))
-                            .child(row().gap(8.0).shrink().min_w(0.0).items_end().child(bubble).child(time)))
+                        .child(content)
                 };
                 let divider = new_day.then(|| row().key(format!("day/{}", m.id)).arrives_whole().w_full().justify_center().mt(10.0)
-                    .child(note(day(&m.time)).font(type_::LABEL)));
+                    .child(note(&message_date(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL)));
                 divider.into_iter().chain([line])
             });
             pane.child(row().w_full().gap(10.0).px(16.0).py(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
@@ -748,6 +801,103 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_times_show_time_only_on_the_same_local_day() {
+        use chrono::{Local, TimeZone};
+        let now = Local.with_ymd_and_hms(2026, 11, 15, 0, 47, 0).earliest().unwrap();
+        for (age, expected) in [
+            (chrono::Duration::zero(), "12:47 AM"),
+            (chrono::Duration::minutes(47), "12:00 AM"),
+            (chrono::Duration::minutes(47) + chrono::Duration::seconds(1), "11/14"),
+            (chrono::Duration::hours(1), "11/14"),
+            (chrono::Duration::hours(24) - chrono::Duration::seconds(1), "11/14"),
+            (chrono::Duration::hours(24), "11/14"),
+            (chrono::Duration::days(8), "11/7"),
+        ] {
+            let iso = (now - age).with_timezone(&chrono::Utc).to_rfc3339();
+            assert_eq!(chat_time(&iso, now), expected);
+        }
+        assert_eq!(chat_time("", now), "");
+        assert_eq!(chat_time("invalid", now), "invalid");
+    }
+
+    #[test]
+    fn message_dates_use_relative_days_then_full_dates() {
+        use chrono::{Local, TimeZone};
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 15).unwrap();
+        for (days, expected) in [
+            (0, "Today"), (1, "Yesterday"), (2, "Friday"),
+            (6, "Monday"), (7, "Sunday"), (8, "Saturday, November 7"),
+            (15, "Saturday, October 31"), (-1, "Monday, November 16"),
+        ] {
+            let date = today - chrono::Duration::days(days);
+            let local = Local.from_local_datetime(&date.and_hms_opt(0, 5, 0).unwrap()).earliest().unwrap();
+            assert_eq!(message_date(&local.with_timezone(&chrono::Utc).to_rfc3339(), today), expected);
+        }
+        assert_eq!(message_date("", today), "");
+        assert_eq!(message_date("invalid", today), "invalid");
+    }
+
+    #[test]
+    fn sender_times_use_relative_dates_then_numeric_dates() {
+        use chrono::{Local, TimeZone};
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 15).unwrap();
+        for (days, expected) in [
+            (0, "Today 12:04 AM"), (1, "Yesterday 12:04 AM"),
+            (2, "Friday 12:04 AM"), (7, "Sunday 12:04 AM"),
+            (8, "11/7 12:04 AM"),
+        ] {
+            let date = today - chrono::Duration::days(days);
+            let local = Local.from_local_datetime(&date.and_hms_opt(0, 4, 0).unwrap()).earliest().unwrap();
+            assert_eq!(message_time(&local.with_timezone(&chrono::Utc).to_rfc3339(), today), expected);
+        }
+        assert_eq!(message_time("", today), "");
+        assert_eq!(message_time("invalid", today), "invalid");
+    }
+
+    #[test]
+    fn message_groups_require_same_sender_day_and_short_gap() {
+        let mut s = init();
+        demo(&mut s);
+        let original = &s.messages.as_ref().unwrap().as_ref().unwrap().msgs[0];
+        let mut previous = original.clone();
+        let mut current = original.clone();
+        previous.time = "2026-11-14T10:00:00Z".into();
+        current.time = "2026-11-14T10:04:59Z".into();
+        assert!(same_message_group(&previous, &current));
+        current.time = "2026-11-14T10:05:00Z".into();
+        assert!(!same_message_group(&previous, &current));
+        current.time = previous.time.clone();
+        current.sender = "Someone else".into();
+        assert!(!same_message_group(&previous, &current));
+        current.sender = previous.sender.clone();
+        current.mine = !previous.mine;
+        assert!(!same_message_group(&previous, &current));
+        current.mine = previous.mine;
+        current.time = "invalid".into();
+        assert!(!same_message_group(&previous, &current));
+        current.time = "2026-11-14T09:59:59Z".into();
+        assert!(!same_message_group(&previous, &current));
+        use chrono::{Local, TimeZone};
+        let midnight = Local.with_ymd_and_hms(2026, 1, 15, 0, 0, 0).earliest().unwrap();
+        previous.time = (midnight - chrono::Duration::seconds(1)).to_rfc3339();
+        current.time = midnight.to_rfc3339();
+        assert!(!same_message_group(&previous, &current));
+    }
+
+    #[test]
+    fn timestamps_use_local_dates_and_twelve_hour_time() {
+        use chrono::{Local, TimeZone};
+        for (hour, label) in [(0, "12:05 AM"), (12, "12:05 PM"), (23, "11:05 PM")] {
+            let local = Local.with_ymd_and_hms(2026, 1, 15, hour, 5, 0).earliest().unwrap();
+            let iso = local.with_timezone(&chrono::Utc).to_rfc3339();
+            assert_eq!(local_time(&iso, "%I:%M %p"), label);
+            assert_eq!(day(&iso), "2026-01-15");
+        }
+        assert_eq!(local_time("", "%I:%M %p"), "");
+        assert_eq!(local_time("invalid", "%I:%M %p"), "invalid");
+    }
 
     #[test]
     fn reply_highlight_blinks_three_times_then_stops() {
