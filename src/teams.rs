@@ -329,7 +329,18 @@ pub fn parse_chats(v: &Value, me: &User) -> Vec<Chat> {
                     let sender = avatar_id(last["from"].as_str().unwrap_or(""));
                     if sender.starts_with("28:") { sender } else { String::new() }
                 },
-                preview: html_to_text(last["content"].as_str().unwrap_or("")).lines().next().unwrap_or("").into(),
+                preview: {
+                    let content = html_to_text(last["content"].as_str().unwrap_or(""));
+                    let text = content.lines().next().unwrap_or("");
+                    let sender = if last["from"].as_str().is_some_and(|from| avatar_id(from) == me.id) {
+                        "You"
+                    } else if peer(c["id"].as_str().unwrap_or(""), &me.id).is_some() {
+                        ""
+                    } else {
+                        sender.trim()
+                    };
+                    if text.is_empty() || sender.is_empty() { text.into() } else { format!("{sender}: {text}") }
+                },
                 time: last["composetime"].as_str().unwrap_or("").into(),
                 unread: chat_unread(c, &me.id),
             }
@@ -553,6 +564,19 @@ mod tests {
         assert_eq!(peer("19:bob_me-oid@unq.gbl.spaces", "me-oid"), Some("bob"));
         assert_eq!(peer("19:me-oid_bob@unq.gbl.spaces", "me-oid"), Some("bob"));
         assert_eq!(peer("19:g@thread.v2", "me-oid"), None);
+    }
+
+    #[test]
+    fn chat_previews_label_self_and_handle_missing_sender_or_content() {
+        let v = json!({"conversations": [
+            {"id": "self", "lastMessage": {"from": "https://x/contacts/8:orgid:me", "imdisplayname": "My Name", "content": "Hello"}},
+            {"id": "unknown", "lastMessage": {"content": "Hello"}},
+            {"id": "empty", "lastMessage": {"imdisplayname": "Bob"}},
+            {"id": "19:me_bob@unq.gbl.spaces", "lastMessage": {"from": "8:orgid:me", "imdisplayname": "My Name", "content": "Hello"}},
+            {"id": "19:group@thread.v2", "lastMessage": {"from": "8:orgid:bob", "imdisplayname": "Bob", "content": "Hello"}}
+        ]});
+        let chats = parse_chats(&v, &User { id: "me".into(), ..User::default() });
+        assert_eq!(chats.iter().map(|c| c.preview.as_str()).collect::<Vec<_>>(), ["You: Hello", "Hello", "", "You: Hello", "Bob: Hello"]);
     }
 
     #[test]
