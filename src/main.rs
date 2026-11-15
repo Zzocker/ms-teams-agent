@@ -1175,7 +1175,8 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .border(2.0, tok::accent(0, dark()).alpha(if s.reply_highlight_on && s.reply_highlight.as_ref().is_some_and(|(id, _)| id == &m.id) { 1.0 } else { 0.0 }))
                     .children(m.reply.as_ref().map(|reply| {
                         let target = reply.id.clone();
-                        row().w_full().max_w(520.0).min_w(0.0).gap(10.0).padding(8.0).mb(6.0).radius(4.0).fill(t.bg)
+                        // A set width: sized from its content, the quote measured its wrapped text at one width and drew it at another, spilling out of a short reply's bubble.
+                        row().w(400.0).shrink().min_w(0.0).gap(10.0).padding(8.0).mb(6.0).radius(4.0).fill(t.bg)
                             .border(1.0, t.separator)
                             .cursor(rune::Cursor::Pointer).hover(t.hover)
                             .label("Go to quoted message").focusable(true)
@@ -1187,7 +1188,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             })
                             .child(el().w(2.0).radius(1.0).fill(t.text_secondary))
                             .child(col().gap(2.0).grow(1.0).shrink().min_w(0.0)
-                                .child(note(&format!("{}  {}", reply.sender, local_time(&reply.time, "%Y-%m-%d %I:%M %p"))).font(type_::LABEL).wrap())
+                                .child(note(&format!("{}  {}", reply.sender, local_time(&reply.time, "%Y-%m-%d %I:%M %p"))).font(type_::LABEL).truncate())
                                 .child(text(reply.text.as_str()).font(type_::BODY).color(t.text).max_lines(2)))
                     }))
                     .children((!m.text.is_empty()).then(|| message_text(m)))
@@ -1439,6 +1440,8 @@ fn main() {
                     page.msgs[1].reply = Some(teams::Reply {
                         id: original.server_id, sender: original.sender, time: original.time, text: original.text,
                     });
+                    // A short answer: the quote must still widen the bubble.
+                    page.msgs[1].text = "Well done".into();
                 }
             }),
             ("link", |s| {
