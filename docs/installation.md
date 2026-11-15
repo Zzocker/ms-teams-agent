@@ -19,9 +19,9 @@ Install runtime dependencies first:
 
 ```sh
 # Arch
-sudo pacman -S fontconfig libxkbcommon libxkbcommon-x11 wayland vulkan-icd-loader
+sudo pacman -S fontconfig libxkbcommon libxkbcommon-x11 wayland vulkan-icd-loader vulkan-swrast
 # Ubuntu 22.04+ / Debian with compatible system libraries
-sudo apt install libfontconfig1 libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libvulkan1
+sudo apt install libfontconfig1 libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libvulkan1 mesa-vulkan-drivers
 ```
 
 Download the archive for your distribution, extract it, then run inside the extracted directory:
