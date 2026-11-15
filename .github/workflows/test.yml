@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  pull_request:
+    branches: [main, release]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ubuntu, os: ubuntu-22.04 }
+          - { name: arch, os: ubuntu-latest, container: "archlinux:latest" }
+          - { name: windows, os: windows-latest }
+          - { name: macos, os: macos-15 }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - if: matrix.name == 'arch'
+        run: pacman -Syu --noconfirm --needed base-devel git rustup python libxkbcommon wayland fontconfig vulkan-icd-loader && rustup default stable
+      - if: matrix.name == 'ubuntu'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - uses: actions/checkout@v4
+      - if: matrix.name != 'arch'
+        uses: dtolnay/rust-toolchain@stable
+      - if: matrix.name != 'arch'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Rust tests
+        run: cargo test --locked
+      - name: Check without optional features
+        run: cargo check --locked --no-default-features
+      - name: Packaging tests
+        run: python3 -m unittest discover -s scripts -p test_package.py
