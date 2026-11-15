@@ -12,7 +12,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let header = row().w_full().gap(10.0).padding(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
         .child(user_avatar(s, &session.user.id, &session.user.name, 36.0)).child(me)
         .child(el().key("sign-out").role("button").label("Sign out").focusable(true).px(10.0).py(6.0).radius(6.0)
-            .fill(t.control_off).hover(t.hover).on_press(sign_out)
+            .fill(t.control_off).hover(t.hover).cursor(rune::Cursor::Pointer).on_press(sign_out)
             .child(text("Sign out").font(type_::LABEL).color(t.text)));
     let chat_row = |c: &Chat, key: &str| {
         let id = c.id.clone();
@@ -20,7 +20,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         let title_font = if c.unread { rune::tok::TextStyle::new(13.0, 700.0) } else { type_::BODY };
         row().key(format!("{key}/{}", c.id)).role("button").label(if c.unread { format!("{}, unread messages", c.title) } else { c.title.clone() }).focusable(true)
             .w_full().gap(10.0).px(if s.show_teams { 30.0 } else { 10.0 }).py(8.0).radius(8.0).items_center()
-            .fill(if picked { t.press } else { t.card }).hover(t.hover)
+            .fill(if picked { t.press } else { t.card }).hover(t.hover).cursor(rune::Cursor::Pointer)
             .on_press(move |s: &mut State| {
                 s.search.clear();
                 open_chat(s, id.clone());
@@ -52,7 +52,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     let id = team.id.clone();
                     let collapsed = s.collapsed_teams.contains(&id);
                     rows.push(row().key(format!("team/{id}")).role("button").label(team.title.as_str())
-                        .focusable(true).w_full().gap(8.0).padding(10.0).items_center().hover(t.hover)
+                        .focusable(true).w_full().gap(8.0).padding(10.0).items_center().hover(t.hover).cursor(rune::Cursor::Pointer)
                         .on_press(move |s: &mut State| {
                             if !s.collapsed_teams.remove(&id) { s.collapsed_teams.insert(id.clone()); }
                         })
@@ -129,7 +129,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         .fill(t.bg).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
         .children([(false, "Chat", &CHAT_ICON), (true, "Teams", &TEAMS_ICON)].into_iter().map(|(teams, label, icon)| {
             col().key(label).role("button").label(label).focusable(true).w_full().center().gap(4.0).py(10.0).radius(6.0)
-                .fill(if s.show_teams == teams { t.press } else { t.bg }).hover(t.hover)
+                .fill(if s.show_teams == teams { t.press } else { t.bg }).hover(t.hover).cursor(rune::Cursor::Pointer)
                 .on_press(move |s: &mut State| if s.show_teams != teams { navigate(s, teams) })
                 .child(rune::icon(icon, 24.0).color(t.text))
                 .child(text(label).font(type_::LABEL).color(t.text))
