@@ -64,6 +64,21 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
     ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
     ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
     ("main", demo),
+    ("updates", |s| { demo(s); s.release_panel = true; }),
+    ("updates-current", |s| {
+        demo(s); s.release_panel = true;
+        s.release_status = releases::Status::Current;
+        s.release_checked_at = Some(chrono::Local::now());
+    }),
+    ("updates-available", |s| {
+        demo(s); s.release_panel = true;
+        s.release_status = releases::Status::Available(releases::Release {
+            version: semver::Version::new(0, 1, 1),
+            url: "https://github.com/Zzocker/ms-teams-agent/releases/tag/v0.1.1".into(),
+        });
+        s.release_checked_at = Some(chrono::Local::now());
+    }),
+    ("updates-error", |s| { demo(s); s.release_panel = true; s.release_status = releases::Status::Failed; }),
     ("reply", |s| {
         demo(s);
         if let Some(Ok(page)) = &mut s.messages {

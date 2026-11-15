@@ -135,7 +135,8 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 .child(text(label).font(type_::LABEL).color(t.text))
         }))
         .child(el().grow(1.0))
-        .child(theme_button(s.theme));
+        .child(theme_button(s.theme))
+        .child(releases::nav_button(s));
 
     let pane = col().grow(1.0).shrink().h_full().min_w(0.0).min_h(0.0).fill(t.bg);
     let pane = match (&s.selected, &s.messages) {

@@ -5,9 +5,10 @@ on:
     branches: [release]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write # attach builds to the release on tags
+  contents: read
 
 jobs:
   build:
@@ -15,29 +16,56 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: ubuntu, os: ubuntu-latest, bin: ms-teams-agent }
-          - { name: arch, os: ubuntu-latest, container: "archlinux:latest", bin: ms-teams-agent }
-          - { name: windows, os: windows-latest, bin: ms-teams-agent.exe }
-          - { name: macos, os: macos-latest, bin: ms-teams-agent }
+          - { name: ubuntu, os: ubuntu-22.04, arch: x86_64, bin: ms-teams-agent }
+          - { name: arch, os: ubuntu-latest, arch: x86_64, container: "archlinux:latest", bin: ms-teams-agent }
+          - { name: windows, os: windows-latest, arch: x86_64, bin: ms-teams-agent.exe }
+          - { name: macos, os: macos-15, arch: aarch64, bin: ms-teams-agent }
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     steps:
       - if: matrix.name == 'arch'
-        run: pacman -Syu --noconfirm --needed base-devel git rustup github-cli && rustup default stable
+        run: pacman -Syu --noconfirm --needed base-devel git rustup python libxkbcommon wayland fontconfig vulkan-icd-loader && rustup default stable
+      - if: matrix.name == 'ubuntu'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - uses: actions/checkout@v4
       - if: matrix.name != 'arch'
         uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --release
-      - run: cargo build --release
-      - uses: actions/upload-artifact@v4
+      - if: matrix.name != 'arch'
+        uses: actions/setup-python@v5
         with:
-          name: ms-teams-agent-${{ matrix.name }}
-          path: target/release/${{ matrix.bin }}
-      - if: startsWith(github.ref, 'refs/tags/')
+          python-version: '3.11'
+      - name: Check tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          cp target/release/${{ matrix.bin }} ms-teams-agent-${{ matrix.name }}${{ matrix.name == 'windows' && '.exe' || '' }}
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes 2>/dev/null || true
-          gh release upload "$GITHUB_REF_NAME" ms-teams-agent-${{ matrix.name }}* --repo "$GITHUB_REPOSITORY" --clobber
+          python3 -c 'import os, tomllib; v = tomllib.load(open("Cargo.toml", "rb"))["package"]["version"]; assert os.environ["GITHUB_REF_NAME"] == "v" + v, "Tag must match Cargo.toml version"'
+      - run: cargo test --release --locked
+      - run: cargo build --release --locked
+      - run: python3 -m unittest discover -s scripts -p test_package.py
+      - run: python3 scripts/package.py ${{ matrix.name }} ${{ matrix.arch }} target/release/${{ matrix.bin }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.name }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: dist
+      - name: Create complete draft preview release
+        working-directory: dist
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --prerelease --generate-notes ./*.tar.gz ./*.zip SHA256SUMS

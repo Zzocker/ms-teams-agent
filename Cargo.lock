@@ -1769,6 +1769,7 @@ dependencies = [
  "notify-rust",
  "pulldown-cmark",
  "rune",
+ "semver",
  "serde_json",
  "tungstenite",
  "ureq",
