@@ -11,6 +11,7 @@ mod images;
 mod markdown;
 mod teams;
 mod notifications;
+mod releases;
 mod ui;
 
 use actions::*;
@@ -36,6 +37,11 @@ enum Screen {
 type Messages = Result<Page, String>;
 
 struct State {
+    release_loader: Latest<Result<Option<releases::Release>, String>>,
+    release_status: releases::Status,
+    release_panel: bool,
+    release_checked_at: Option<chrono::DateTime<chrono::Local>>,
+    release_open_error: bool,
     screen: Screen,
     avatars: avatars::Avatars,
     #[cfg(feature = "image")]
@@ -116,6 +122,11 @@ struct State {
 
 fn init() -> State {
     State {
+        release_loader: Latest::default(),
+        release_status: releases::Status::Idle,
+        release_panel: false,
+        release_checked_at: None,
+        release_open_error: false,
         screen: Screen::Loading,
         avatars: Default::default(),
         #[cfg(feature = "image")]
@@ -181,6 +192,7 @@ fn setup(s: &mut State, waker: Waker) {
     s.older_loader.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
     s.reader.set_waker(waker.clone());
+    s.release_loader.set_waker(waker.clone());
     s.waker = Some(waker);
     // The app has no arguments of its own; any argument is Rune's headless tooling, which gets no network.
     if std::env::args().len() == 1 {
@@ -194,10 +206,10 @@ fn reply_blink(elapsed: f32) -> Option<bool> {
 }
 
 fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
-    let mut changed = false;
+    let mut changed = releases::poll(s);
     if let Some((_, started)) = &s.reply_highlight {
         if let Some(on) = reply_blink(started.elapsed().as_secs_f32()) {
-            changed = s.reply_highlight_on != on;
+            changed |= s.reply_highlight_on != on;
             s.reply_highlight_on = on;
             tx.wake_after(std::time::Duration::from_millis(150));
         } else {
@@ -380,7 +392,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     let title = |s: &str| text(s).font(type_::TITLE).color(t.text);
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary).wrap();
     let page = col().w_full().h_full().center().gap(14.0).padding(32.0).fill(t.bg);
-    match &s.screen {
+    let content = match &s.screen {
         Screen::Loading => page.child(note("Signing in…")),
         Screen::Login(error) => page
             .child(title("Microsoft Teams"))
@@ -400,7 +412,11 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
             .children(image_viewer(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))))
             .children(draft_editor(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))))
             .children(message_menu(s)),
-    }
+    };
+    col().w_full().h_full().child(content.grow(1.0).min_h(0.0))
+        .children((!matches!(s.screen, Screen::Main { .. })).then(||
+            releases::nav_button(s).w(44.0).pin(Some(12.0), Some(12.0), None, None)))
+        .children(releases::panel(s))
 }
 
 fn main() {
