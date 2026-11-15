@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Teams
+Comment=Lightweight Microsoft Teams client
+Exec=ms-teams-agent
+Icon=ms-teams-agent
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+StartupWMClass=ms-teams-agent

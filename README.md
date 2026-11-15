@@ -28,6 +28,13 @@ sudo apt install libfontconfig1 libxkbcommon0 libvulkan1
 chmod +x ms-teams-agent && ./ms-teams-agent
 ```
 
+For the app icon and a launcher entry, put `ms-teams-agent` on your `PATH` and, from a checkout:
+
+```sh
+install -Dm644 assets/icons/icon.svg ~/.local/share/icons/hicolor/scalable/apps/ms-teams-agent.svg
+install -Dm644 assets/linux/ms-teams-agent.desktop ~/.local/share/applications/ms-teams-agent.desktop
+```
+
 ### Windows
 
 Unzip and run `ms-teams-agent.exe`. Building from source needs the MSVC toolchain (rustup's default).

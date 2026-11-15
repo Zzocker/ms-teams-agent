@@ -1443,6 +1443,9 @@ fn file_demo(s: &mut State) {
 }
 
 fn main() {
+    // Linux takes the icon from assets/linux/ms-teams-agent.desktop, matched by this id; macOS and Windows from icon.png.
+    rune::set_app_id("ms-teams-agent");
+    rune::set_app_icon(include_bytes!("../assets/icons/icon.png").as_slice()).expect("icon.png is a PNG");
     rune::run(AppSpec::<State> {
         scenes: &[
             ("login", |s| s.screen = Screen::Login(None)),
