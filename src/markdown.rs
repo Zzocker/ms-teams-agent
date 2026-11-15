@@ -1,7 +1,7 @@
-//! Markdown in message text (people paste it, often as a Teams "Markdown" code block):
-//! laid out as plain text with its styles kept as byte ranges.
+//! Markdown in message text, read by pulldown-cmark: laid out as plain text with its styles kept
+//! as byte ranges. A ```markdown block (as Teams sends a pasted one) is read as Markdown too.
 
-use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, Parser, Tag, TagEnd};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,6 +36,14 @@ impl Md {
         self.text.push_str(s);
     }
 
+    /// Markers and dropped source bytes map to where the next kept byte went.
+    fn fill_map(&mut self) {
+        let mut next = self.text.len();
+        for v in self.map.iter_mut().rev() {
+            if *v == UNSET { *v = next } else { *v = (*v).min(self.text.len()); next = *v }
+        }
+    }
+
     fn line(&mut self) {
         if !self.text.is_empty() && !self.text.ends_with('\n') {
             self.text.push('\n');
@@ -52,20 +60,34 @@ impl Md {
 }
 
 // shortcut: tables, task lists and strikethrough stay as typed; turn on their pulldown-cmark Options if people send them.
+const UNSET: usize = usize::MAX;
+
 pub fn parse(src: &str) -> Md {
-    const UNSET: usize = usize::MAX;
     let mut md = Md { text: String::new(), spans: vec![], map: vec![UNSET; src.len() + 1] };
     let mut open: Vec<(usize, Option<Style>)> = vec![];
     // Each open list's next number (None: bullets).
     let mut lists: Vec<Option<u64>> = vec![];
+    // The open ```markdown block's text, read as Markdown when it ends.
+    let mut nested: Option<String> = None;
     for (event, range) in Parser::new(src).into_offset_iter() {
         match event {
+            Event::Text(t) if nested.is_some() => nested.iter_mut().for_each(|n| n.push_str(&t)),
+            Event::End(TagEnd::CodeBlock) if nested.is_some() => {
+                open.pop();
+                let inner = parse(&nested.take().unwrap_or_default());
+                let start = md.text.len();
+                md.spans.extend(inner.spans.into_iter().map(|(r, s)| (r.start + start..r.end + start, s)));
+                md.text.push_str(&inner.text);
+            }
             Event::Start(tag) => {
+                if let Tag::CodeBlock(CodeBlockKind::Fenced(lang)) = &tag && is_markdown(lang) {
+                    nested = Some(String::new());
+                }
                 let style = match &tag {
                     Tag::Strong => Some(Style::Bold),
                     Tag::Emphasis => Some(Style::Italic),
                     Tag::Heading { .. } => Some(Style::Heading),
-                    Tag::CodeBlock(_) => Some(Style::Block),
+                    Tag::CodeBlock(_) if nested.is_none() => Some(Style::Block),
                     _ => None,
                 };
                 match tag {
@@ -108,12 +130,34 @@ pub fn parse(src: &str) -> Md {
         }
     }
     md.text.truncate(md.text.trim_end().len());
-    // Markers and dropped source bytes map to where the next kept byte went.
-    let mut next = md.text.len();
-    for v in md.map.iter_mut().rev() {
-        if *v == UNSET { *v = next } else { *v = (*v).min(md.text.len()); next = *v }
-    }
+    md.fill_map();
     md
+}
+
+fn is_markdown(lang: &CowStr) -> bool {
+    matches!(lang.split_whitespace().next().unwrap_or("").to_ascii_lowercase().as_str(), "markdown" | "md")
+}
+
+/// The fenced code blocks pulldown-cmark finds in `src`: each one's source lines (fences, their
+/// indent and the closing line's newline included), language and code.
+pub fn code_blocks(src: &str) -> Vec<(Range<usize>, String, String)> {
+    let mut blocks: Vec<(Range<usize>, String, String)> = vec![];
+    for (event, range) in Parser::new(src).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(lang))) => {
+                let start = range.start - (src[..range.start].len() - src[..range.start].trim_end_matches([' ', '\t']).len());
+                let end = range.end + usize::from(src[range.end..].starts_with('\n'));
+                blocks.push((start..end, lang.split_whitespace().next().unwrap_or("").into(), String::new()));
+            }
+            Event::Text(t) => {
+                if let Some((_, _, code)) = blocks.last_mut().filter(|(r, ..)| r.start <= range.start && range.end <= r.end) {
+                    code.push_str(&t);
+                }
+            }
+            _ => {}
+        }
+    }
+    blocks
 }
 
 /// Right after a list marker, the item's first block shouldn't open a blank line.
@@ -123,7 +167,22 @@ fn after_marker(md: &Md) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Style::*, parse};
+    use super::{Style::*, code_blocks, parse};
+
+    #[test]
+    fn markdown_blocks_read_as_markdown_and_other_code_stays_code() {
+        let src = "plain **bold**\n  ```markdown\n    # Heading\n  ```\n```rust\nlet x = 1;\n```\n````md\n```\nnested\n```\n````";
+        let md = parse(src);
+        assert_eq!(md.text, "plain bold\n\nHeading\n\nlet x = 1;\n\nnested");
+        let styled: Vec<_> = md.spans.iter().map(|(r, s)| (&md.text[r.clone()], *s)).collect();
+        assert_eq!(styled, [("bold", Bold), ("Heading", Heading), ("let x = 1;", Block), ("nested", Block)]);
+        let blocks = code_blocks(src);
+        assert_eq!(blocks.iter().map(|(r, l, c)| (&src[r.clone()], l.as_str(), c.as_str())).collect::<Vec<_>>(), [
+            ("  ```markdown\n    # Heading\n  ```\n", "markdown", "  # Heading\n"),
+            ("```rust\nlet x = 1;\n```\n", "rust", "let x = 1;\n"),
+            ("````md\n```\nnested\n```\n````", "md", "```\nnested\n```\n"),
+        ]);
+    }
 
     #[test]
     fn markers_go_and_their_styles_stay() {
@@ -138,3 +197,5 @@ mod tests {
         assert_eq!(md.at(src.len()), md.text.len());
     }
 }
+
+

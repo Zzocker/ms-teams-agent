@@ -214,8 +214,24 @@ fn message_html(text: &str, images: &[(String, (u32, u32))]) -> String {
     })
 }
 
+/// Each fenced code block goes as a Teams code block, as Teams sends one, so it shows as code there too.
 pub fn text_to_html(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\n', "<br>")
+    let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\n', "<br>");
+    #[cfg(feature = "markdown")]
+    let blocks = crate::markdown::code_blocks(text);
+    #[cfg(not(feature = "markdown"))]
+    let blocks: Vec<(Range<usize>, String, String)> = vec![];
+    let mut html = String::new();
+    let mut at = 0;
+    for (r, lang, code) in blocks {
+        html.push_str(&escape(&text[at..r.start]));
+        let lang: String = lang.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '#')).collect();
+        let class = if lang.is_empty() { String::new() } else { format!(r#" class="language-{lang}""#) };
+        html.push_str(&format!("<pre{class}><code>{}</code></pre>", escape(code.trim_end_matches('\n'))));
+        at = r.end;
+    }
+    html.push_str(&escape(&text[at..]));
+    html
 }
 
 /// The chats with guessed titles; [`name_chats`] gives them their people's names.
@@ -554,17 +570,23 @@ fn reply_content(raw: &str) -> (Option<Reply>, (String, Vec<(Range<usize>, Strin
 
 /// Teams message HTML as plain text: tags dropped, block ends as newlines, common entities decoded.
 pub fn html_to_text(html: &str) -> String {
-    html_to_rich(html).0
+    rich(html, false).0
 }
 
-/// [`html_to_text`] plus its `http(s)` links: byte ranges of the text and where they point.
+/// [`html_to_text`] plus its `http(s)` links (byte ranges of the text and where they point), with
+/// code blocks fenced as typed (```lang), so Markdown reads them as code blocks again.
 // shortcut: no formatting or mentions; extend here when the message view gets them.
 pub fn html_to_rich(html: &str) -> (String, Vec<(Range<usize>, String)>) {
+    rich(html, true)
+}
+
+fn rich(html: &str, fences: bool) -> (String, Vec<(Range<usize>, String)>) {
     let decode = |s: &str| s.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
     let mut out = String::new();
     let mut links = Vec::new();
     let mut open: Option<(usize, String)> = None;
-    let mut pre = false;
+    // The open code block: where its code starts in `out`, and its language.
+    let mut pre: Option<(usize, String)> = None;
     let mut rest = html;
     while let Some(i) = rest.find('<') {
         // Newlines between tags are source formatting, not content; keeping them doubles every line break.
@@ -574,12 +596,25 @@ pub fn html_to_rich(html: &str) -> (String, Vec<(Range<usize>, String)>) {
         let Some(j) = rest[i..].find('>') else { break };
         let inner = &rest[i + 1..i + j];
         let tag = inner.trim_start_matches('/').split([' ', '/']).next().unwrap_or("").to_ascii_lowercase();
-        if tag == "pre" {
-            pre = !inner.starts_with('/');
-        }
         // In a code block every <br> is a line, so blank lines between sections stay.
-        if matches!(tag.as_str(), "br" | "p" | "div" | "li" | "tr") && (!out.ends_with('\n') || pre && tag == "br") {
+        if matches!(tag.as_str(), "br" | "p" | "div" | "li" | "tr" | "pre") && (!out.ends_with('\n') || pre.is_some() && tag == "br") {
             out.push('\n');
+        }
+        if tag == "pre" && !inner.starts_with('/') {
+            let lang = inner.split_once("language-").and_then(|(_, l)| l.split(['"', '\'', ' ']).next()).unwrap_or("");
+            pre = Some((out.len(), lang.to_owned()));
+        } else if tag == "pre" && let Some((start, lang)) = pre.take().filter(|_| fences) {
+            // One backtick more than the longest run inside, so a fence in the code can't close it.
+            let run = out[start..].split(|c| c != '`').map(str::len).max().unwrap_or(0);
+            let fence = "`".repeat(run.max(2) + 1);
+            let open = format!("{fence}{lang}\n");
+            out.insert_str(start, &open);
+            links.iter_mut().filter(|(r, _): &&mut (Range<usize>, String)| r.start >= start).for_each(|(r, _)| *r = r.start + open.len()..r.end + open.len());
+            if !out.ends_with('\n') { out.push('\n'); }
+            out.push_str(&fence);
+            out.push('\n');
+        } else if tag == "pre" {
+            pre = None;
         }
         if tag == "a" {
             if inner.starts_with('/') {
@@ -842,6 +877,19 @@ mod tests {
         assert_eq!(html_to_text("<img src=\"x\">"), "");
         assert_eq!(html_to_text("plain &amp;lt;"), "plain &lt;");
         assert_eq!(html_to_text("<p>a<br><br>b</p><pre><code>c<br><br>d</code></pre>"), "a\nb\nc\n\nd");
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn code_blocks_go_as_teams_code_blocks_and_come_back_fenced() {
+        let typed = "hi <you>\n```markdown\n# H1\n\n## H2\n```\nbye";
+        let html = text_to_html(typed);
+        assert_eq!(html, r#"hi &lt;you&gt;<br><pre class="language-markdown"><code># H1<br><br>## H2</code></pre>bye"#);
+        assert_eq!(html_to_rich(&html).0, typed);
+        assert_eq!(html_to_text(&html), "hi <you>\n# H1\n\n## H2\nbye");
+        // A fence inside a block gets a longer fence around it, so it stays inside.
+        let nested = html_to_rich("<pre class=\"language-md x\"><code>a<br>```<br>b<br>```</code></pre>").0;
+        assert_eq!(nested, "````md\na\n```\nb\n```\n````");
         let typed = "a <b> & c\nd &lt;";
         assert_eq!(text_to_html(typed), "a &lt;b&gt; &amp; c<br>d &amp;lt;");
         assert_eq!(html_to_text(&text_to_html(typed)), typed);
@@ -892,4 +940,3 @@ mod tests {
         assert_eq!(b64url(b"ab"), "YWI");
     }
 }
-

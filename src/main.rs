@@ -713,6 +713,11 @@ fn file_card(s: &State, f: &teams::File) -> El {
         .child(body)
 }
 
+/// Whether `before_caret` leaves a ``` block open: there Enter types a line, as in Teams, rather than sending.
+fn in_code_block(before_caret: &str) -> bool {
+    before_caret.lines().filter(|l| l.trim_start().starts_with("```")).count() % 2 == 1
+}
+
 /// A picture waiting in the draft, with a button to take it out.
 fn pasted_image(image: &rune::Image, i: usize) -> El {
     static CLOSE: rune::Icon = rune::Icon { name: "pasted-remove", view: 16.0, body: r#"<path d="M4 4l8 8 M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"# };
@@ -756,18 +761,10 @@ fn message_text(m: &Msg) -> El {
     let link = tok::accent(0, true);
     #[cfg(feature = "markdown")]
     let (text, links, mut spans) = {
-        use markdown::Style;
+        // As the draft's preview showed it.
         let md = markdown::parse(&m.text);
         let links: Vec<_> = m.links.iter().map(|(r, url)| (md.at(r.start)..md.at(r.end), url)).filter(|(r, _)| !r.is_empty()).collect();
-        let spans: Vec<_> = md.spans.iter().map(|(r, style)| {
-            let span = rune::Span::new(r.start, r.end);
-            match style {
-                Style::Bold | Style::Heading => span.bold(),
-                Style::Italic => span.italic(),
-                Style::Code => span.mono().bg(t.press, 2.0),
-                Style::Block => span.mono(),
-            }
-        }).collect();
+        let spans = md_spans(&md);
         (md.text, links, spans)
     };
     #[cfg(not(feature = "markdown"))]
@@ -779,6 +776,40 @@ fn message_text(m: &Msg) -> El {
         // Long URLs have no spaces to wrap at.
         .font(type_::BODY).color(t.text).wrap_anywhere().selectable(true)
         .on_link(|_: &mut State, url: &str, tx: &mut Tx| { let _ = tx.open_url(url); })
+}
+
+#[cfg(feature = "markdown")]
+fn md_spans(md: &markdown::Md) -> Vec<rune::Span> {
+    use markdown::Style;
+    md.spans.iter().map(|(r, style)| {
+        let span = rune::Span::new(r.start, r.end);
+        match style {
+            Style::Bold | Style::Heading => span.bold(),
+            Style::Italic => span.italic(),
+            Style::Code => span.mono().bg(tok::theme(true).press, 2.0),
+            Style::Block => span.mono(),
+        }
+    }).collect()
+}
+
+/// How a draft with a ``` block will read, as its bubble will show it, at most `max_h` tall;
+/// nothing for a draft without one.
+#[cfg(feature = "markdown")]
+fn draft_preview(draft: &str, max_h: f32) -> Option<El> {
+    let t = tok::theme(true);
+    draft.contains("```").then(|| {
+        let md = markdown::parse(draft);
+        let spans = md_spans(&md);
+        col().key("draft-preview").grow(1.0).min_w(0.0).max_h(max_h).gap(4.0).pl(12.0).border_sides([0.0, 0.0, 0.0, 1.0], t.separator)
+            .child(text("Preview").font(type_::LABEL).color(t.text_secondary))
+            .child(col().w_full().scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0)
+                .child(rune::rich(md.text, spans).font(type_::BODY).color(t.text).wrap_anywhere().selectable(true)))
+    })
+}
+
+#[cfg(not(feature = "markdown"))]
+fn draft_preview(_: &str, _: f32) -> Option<El> {
+    None
 }
 
 fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
@@ -979,6 +1010,9 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .child(note(&message_date(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL)));
                 divider.into_iter().chain([line])
             });
+            // A side-by-side preview needs room for a block, so the box may grow taller then.
+            let lines = if s.draft.text.contains("```") { 12 } else { 6 };
+            let preview = draft_preview(&s.draft.text, lines as f32 * type_::BODY.line_px());
             pane.child(row().w_full().gap(10.0).px(16.0).py(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
                     .child(chats.iter().find(|c| &c.id == id).map_or_else(|| avatar(title, 32.0), |c| chat_avatar(s, c, &session.user.id, 32.0)))
                     .child(text(title).font(type_::TITLE).color(t.text).truncate()))
@@ -996,11 +1030,14 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                         .child(col().grow(1.0).shrink().min_w(0.0).gap(8.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
                             .children((!s.pasted.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0)
                                 .children(s.pasted.iter().enumerate().map(|(i, (_, image))| pasted_image(image, i)))))
-                            .child(auto_grow(draft_paste(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
-                                .placeholder("Type a message", t.text_secondary)
-                                .caret(t.text, tok::accent(0, true).alpha(0.3))
-                                .on_edit(|s: &mut State| &mut s.draft)
-                                .on_submit(|s: &mut State, _| send(s))), 1, 6)))
+                            // Writing on the left, and beside it how a draft with a ``` block will read.
+                            .child(row().w_full().gap(12.0)
+                                .child(col().grow(1.0).min_w(0.0).child(auto_grow(draft_paste(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
+                                    .placeholder("Type a message", t.text_secondary)
+                                    .caret(t.text, tok::accent(0, true).alpha(0.3))
+                                    .on_edit(|s: &mut State| &mut s.draft)
+                                    .on_submit(|s: &mut State, _| if in_code_block(&s.draft.text[..s.draft.range().0]) { s.draft.insert("\n") } else { send(s) })), 1, lines)))
+                                .children(preview)))
                         .child(button("send", "Send", true, send)))))
         }
     };
@@ -1124,8 +1161,13 @@ fn main() {
             ("markdown", |s| {
                 demo(s);
                 if let Some(Ok(page)) = &mut s.messages {
-                    page.msgs[0].text = teams::html_to_text(r#"<pre class="language-markdown"><code>**Release&nbsp;checklist**<br><br>-&nbsp;Bump&nbsp;`version`&nbsp;in&nbsp;**Cargo.toml**<br>&nbsp;&nbsp;-&nbsp;then&nbsp;run&nbsp;*all*&nbsp;tests<br><br>```<br>cargo&nbsp;test&nbsp;--all-features<br>```<br><br>#&nbsp;Done</code></pre>"#);
+                    page.msgs[0].text = teams::html_to_rich(r#"<pre class="language-markdown"><code>**Release&nbsp;checklist**<br><br>-&nbsp;Bump&nbsp;`version`&nbsp;in&nbsp;**Cargo.toml**<br>&nbsp;&nbsp;-&nbsp;then&nbsp;run&nbsp;*all*&nbsp;tests<br><br>```<br>cargo&nbsp;test&nbsp;--all-features<br>```<br><br>#&nbsp;Done</code></pre>"#).0;
                 }
+            }),
+            #[cfg(feature = "markdown")]
+            ("preview", |s| {
+                demo(s);
+                s.draft = TextEdit::new("this is in plain text\n```markdown\n# Here Markdown Starts\n- with **bold** and `code`\n```\n```sh\ncargo test\n```");
             }),
             #[cfg(feature = "image")]
             ("file", file_demo),
@@ -1274,6 +1316,14 @@ mod tests {
         }
         assert_eq!(local_time("", "%I:%M %p"), "");
         assert_eq!(local_time("invalid", "%I:%M %p"), "invalid");
+    }
+
+    #[test]
+    fn enter_types_a_line_inside_an_open_code_block() {
+        assert!(!super::in_code_block("plain text"));
+        assert!(super::in_code_block("text\n```markdown\n# Heading"));
+        assert!(super::in_code_block("```"));
+        assert!(!super::in_code_block("```sh\nls\n```"));
     }
 
     #[test]
