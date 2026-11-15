@@ -33,6 +33,8 @@ struct State {
     #[cfg(feature = "image")]
     images: images::Images,
     panel_width: f32,
+    /// The picked theme: `None` follows the system, else dark or light.
+    theme: Option<bool>,
     /// The picture open full-window, by preview URL; closed if it isn't in the open chat.
     #[cfg_attr(not(feature = "image"), allow(dead_code))]
     viewer: Option<String>,
@@ -96,6 +98,7 @@ fn init() -> State {
         #[cfg(feature = "image")]
         images: Default::default(),
         panel_width: PANEL_MAX,
+        theme: None,
         viewer: None,
         reply_target: None,
         reply_error: None,
@@ -527,7 +530,7 @@ fn with_bar(key: &'static str, list: El, bar: &Bar) -> El {
         });
     col().w_full().grow(1.0).min_h(0.0)
         .child(list)
-        .child(el().absolute(0.0, 0.0).radius(2.0).fill(tok::theme(true).text_secondary.alpha(0.5)).live_rect(&bar.rect))
+        .child(el().absolute(0.0, 0.0).radius(2.0).fill(tok::theme(dark()).text_secondary.alpha(0.5)).live_rect(&bar.rect))
         .child(track)
 }
 
@@ -550,9 +553,9 @@ fn thumb(at: ScrollPos) -> [f32; 4] {
 }
 
 fn button(key: &'static str, label: &'static str, primary: bool, on_press: fn(&mut State)) -> El {
-    let t = tok::theme(true);
+    let t = tok::theme(dark());
     el().key(key).role("button").label(label).focusable(true).px(16.0).py(8.0).radius(8.0)
-        .fill(if primary { tok::accent(0, true) } else { t.control_off })
+        .fill(if primary { tok::accent(0, dark()) } else { t.control_off })
         .on_press(on_press)
         .child(text(label).font(type_::TITLE).color(t.text))
 }
@@ -621,8 +624,8 @@ fn same_message_group(previous: &Msg, current: &Msg) -> bool {
 fn avatar(name: &str, size: f32) -> El {
     let initials: String = name.split_whitespace().filter_map(|w| w.chars().next()).take(2).flat_map(char::to_uppercase).collect();
     let hue = name.bytes().map(usize::from).sum();
-    el().size(size, size).radius(size / 2.0).center().fill(tok::accent(hue, true))
-        .child(text(initials.as_str()).font(type_::LABEL).color(tok::theme(true).bg))
+    el().size(size, size).radius(size / 2.0).center().fill(tok::accent(hue, dark()))
+        .child(text(initials.as_str()).font(type_::LABEL).color(tok::theme(dark()).bg))
 }
 
 fn chat_avatar_id<'a>(chat: &'a Chat, me: &'a str) -> &'a str {
@@ -665,7 +668,7 @@ const IMAGE_TILE: (f32, f32) = (256.0, 198.0);
 
 #[cfg(feature = "image")]
 fn message_image(s: &State, url: &str) -> El {
-    let t = tok::theme(true);
+    let t = tok::theme(dark());
     let open = url.to_owned();
     let tile = el().size(IMAGE_TILE.0, IMAGE_TILE.1).radius(6.0).clip_rounded(6.0).fill(t.bg).border(1.0, t.separator)
         .role("button").focusable(true).cursor(rune::Cursor::Pointer).hover(t.hover)
@@ -691,7 +694,7 @@ fn image_viewer(s: &State) -> Option<El> {
     let msg = all[i].0;
     let prev = i.checked_sub(1).map(|j| all[j].1.clone());
     let next = all.get(i + 1).map(|(_, u)| (*u).clone());
-    let t = tok::theme(true);
+    let t = tok::theme(dark());
     let icon_button = |icon: &'static rune::Icon, label: &'static str, target: Option<String>| {
         el().size(40.0, 40.0).center().radius(20.0).role("button").label(label).focusable(true)
             .cursor(rune::Cursor::Pointer).hover(t.hover)
@@ -739,7 +742,7 @@ fn image_viewer(_: &State) -> Option<El> {
 
 #[cfg(not(feature = "image"))]
 fn message_image(_: &State, _: &str) -> El {
-    text("[image]").font(type_::BODY).color(tok::theme(true).text_secondary)
+    text("[image]").font(type_::BODY).color(tok::theme(dark()).text_secondary)
 }
 
 /// A shared file as Teams shows it: its name over a preview of its first page, or its icon when
@@ -748,7 +751,7 @@ fn file_card(s: &State, f: &teams::File) -> El {
     static DOC: rune::Icon = rune::Icon { name: "file-doc", view: 24.0, body: r#"<path d="M6 2.75h8l4.25 4.25v14.25H6z M14 2.75V7h4.25 M9 12h6 M9 15h6 M9 18h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>"# };
     const W: f32 = 360.0;
     const PREVIEW_H: f32 = 200.0;
-    let t = tok::theme(true);
+    let t = tok::theme(dark());
     // Office's colours, so a Word file reads as Word at a glance.
     let tint = match f.kind.as_str() {
         "doc" | "docx" => rune::color::hex("#185abd").unwrap_or(t.text_secondary),
@@ -822,7 +825,7 @@ fn message_actions(m: &Msg, shown: bool) -> Option<El> {
     static QUOTE: rune::Icon = rune::Icon { name: "msg-quote", view: 20.0, body: r#"<path d="M4 11.5c0-3 1.5-5 4-5.5 M4 11.5h3.5v3.5H4z M11 11.5c0-3 1.5-5 4-5.5 M11 11.5h3.5v3.5H11z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
     static MORE: rune::Icon = rune::Icon { name: "msg-more", view: 20.0, body: r#"<circle cx="5" cy="10" r="1.3" fill="currentColor"/><circle cx="10" cy="10" r="1.3" fill="currentColor"/><circle cx="15" cy="10" r="1.3" fill="currentColor"/>"# };
     if m.server_id.is_empty() { return None }
-    let t = tok::theme(true);
+    let t = tok::theme(dark());
     let button = |key: String, label: &'static str, icon: &'static rune::Icon| el().key(key).size(28.0, 28.0).center().radius(6.0)
         .role("button").label(label).focusable(true).cursor(rune::Cursor::Pointer).hover(t.hover)
         .child(rune::icon(icon, 16.0).color(t.text));
@@ -851,7 +854,7 @@ fn message_actions(m: &Msg, shown: bool) -> Option<El> {
 fn message_menu(s: &State) -> Option<El> {
     let id = s.menu.as_deref()?;
     let m = s.messages.as_ref()?.as_ref().ok()?.msgs.iter().find(|m| m.id == id)?;
-    let t = tok::theme(true);
+    let t = tok::theme(dark());
     let item = |key: &'static str, label: &'static str| row().key(key).role("menuitem").label(label).focusable(true)
         .w_full().px(12.0).py(6.0).radius(4.0).cursor(rune::Cursor::Pointer).hover(t.hover)
         .child(text(label).font(type_::BODY).color(t.text));
@@ -869,7 +872,7 @@ fn message_menu(s: &State) -> Option<El> {
 /// A picture waiting in the draft, with a button to take it out.
 fn pasted_image(image: &rune::Image, i: usize) -> El {
     static CLOSE: rune::Icon = rune::Icon { name: "pasted-remove", view: 16.0, body: r#"<path d="M4 4l8 8 M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"# };
-    let t = tok::theme(true);
+    let t = tok::theme(dark());
     col().key(format!("pasted/{i}")).size(150.0, 100.0).radius(6.0).clip_rounded(6.0).fill(t.bg).border(1.0, t.separator)
         .child(el().w_full().h_full().pixels_fit(image.pixels(), rune::SurfaceFit::Fit).label("Pasted image"))
         .child(el().pin(None, Some(4.0), Some(4.0), None).size(22.0, 22.0).center().radius(11.0).fill(t.card)
@@ -900,13 +903,13 @@ fn loading_messages() -> El {
     };
     rune::icon(&RING, 24.0).key("message-loader")
         .role("progressbar").label("Loading messages")
-        .color(tok::theme(true).text_secondary).looping(rune::LoopSpec::rotation(0.9))
+        .color(tok::theme(dark()).text_secondary).looping(rune::LoopSpec::rotation(0.9))
 }
 
 /// A message's text, its web links in the accent colour and opened in the browser on a click.
 fn message_text(m: &Msg) -> El {
-    let t = tok::theme(true);
-    let link = tok::accent(0, true);
+    let t = tok::theme(dark());
+    let link = tok::accent(0, dark());
     #[cfg(feature = "markdown")]
     let (text, links, mut spans) = {
         // As the draft's preview showed it.
@@ -934,7 +937,7 @@ fn md_spans(md: &markdown::Md) -> Vec<rune::Span> {
         match style {
             Style::Bold | Style::Heading => span.bold(),
             Style::Italic => span.italic(),
-            Style::Code => span.mono().bg(tok::theme(true).press, 2.0),
+            Style::Code => span.mono().bg(tok::theme(dark()).press, 2.0),
             Style::Block => span.mono(),
         }
     }).collect()
@@ -963,10 +966,10 @@ fn editor_split(start: f32, delta: f32, width: f32) -> f32 {
 /// right, split by a divider that drags. Escape or a click outside closes it; the draft stays.
 fn draft_editor(s: &State) -> Option<El> {
     if !s.editor { return None }
-    let t = tok::theme(true);
+    let t = tok::theme(dark());
     let input = draft_paste(text_input(&s.draft, type_::BODY).key("editor-draft").label("Message").color(t.text)
         .placeholder("Type a message", t.text_secondary)
-        .caret(t.text, tok::accent(0, true).alpha(0.3))
+        .caret(t.text, tok::accent(0, dark()).alpha(0.3))
         .autofocus()
         .on_edit(|s: &mut State| &mut s.draft)
         // Enter is a new line here; Send sends.
@@ -1015,7 +1018,7 @@ fn draft_editor(s: &State) -> Option<El> {
 }
 
 fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
-    let t = tok::theme(true);
+    let t = tok::theme(dark());
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary);
 
     let me = col().gap(2.0).grow(1.0).min_w(0.0)
@@ -1044,7 +1047,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .children((!c.time.is_empty()).then(|| text(&chat_time(&c.time, chrono::Local::now())).font(if c.unread { title_font } else { type_::LABEL }).color(if c.unread { t.text } else { t.text_secondary }))))
                 .child(row().w_full().gap(8.0).items_center()
                     .children((!c.preview.is_empty()).then(|| text(&c.preview).font(if c.unread { type_::TITLE } else { type_::BODY }).color(if c.unread { t.text } else { t.text_secondary }).truncate().grow(1.0).min_w(0.0)))
-                    .children(c.unread.then(|| el().size(8.0, 8.0).radius(4.0).fill(tok::accent(0, true))))))
+                    .children(c.unread.then(|| el().size(8.0, 8.0).radius(4.0).fill(tok::accent(0, dark()))))))
     };
     let mut rows: Vec<El> = Vec::new();
     if s.show_teams {
@@ -1102,7 +1105,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         .child(col().key("search-box").w_full().max_w(560.0).shrink().px(12.0).py(6.0).radius(8.0).fill(t.bg)
             .child(text_input(&s.search, type_::BODY).key("search").label("Search").color(t.text)
                 .placeholder("Search", t.text_secondary)
-                .caret(t.text, tok::accent(0, true).alpha(0.3))
+                .caret(t.text, tok::accent(0, dark()).alpha(0.3))
                 .on_edit(|s: &mut State| &mut s.search)));
     let list = with_bar("chats", col().w_full().gap(2.0).padding(6.0).children(rows)
         .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0), &s.chat_bar);
@@ -1144,7 +1147,9 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 .on_press(move |s: &mut State| if s.show_teams != teams { navigate(s, teams) })
                 .child(rune::icon(icon, 24.0).color(t.text))
                 .child(text(label).font(type_::LABEL).color(t.text))
-        }));
+        }))
+        .child(el().grow(1.0))
+        .child(theme_button(s.theme));
 
     let pane = col().grow(1.0).shrink().h_full().min_w(0.0).min_h(0.0).fill(t.bg);
     let pane = match (&s.selected, &s.messages) {
@@ -1166,8 +1171,8 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 let head = prev.is_none_or(|p| !same_message_group(p, m));
                 let time = note(&message_time(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL);
                 let bubble = col().max_w(860.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(12.0)
-                    .fill(if m.mine { tok::accent(0, true).alpha(0.3) } else { t.card })
-                    .border(2.0, tok::accent(0, true).alpha(if s.reply_highlight_on && s.reply_highlight.as_ref().is_some_and(|(id, _)| id == &m.id) { 1.0 } else { 0.0 }))
+                    .fill(if m.mine { tok::accent(0, dark()).alpha(0.3) } else { t.card })
+                    .border(2.0, tok::accent(0, dark()).alpha(if s.reply_highlight_on && s.reply_highlight.as_ref().is_some_and(|(id, _)| id == &m.id) { 1.0 } else { 0.0 }))
                     .children(m.reply.as_ref().map(|reply| {
                         let target = reply.id.clone();
                         row().w_full().max_w(520.0).min_w(0.0).gap(10.0).padding(8.0).mb(6.0).radius(4.0).fill(t.bg)
@@ -1250,19 +1255,19 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             .child(text("Delete").font(type_::LABEL).color(rune::Color { r: 0.95, g: 0.35, b: 0.35, a: 1.0 })))
                         .child(el().key("delete-cancel").role("button").label("Keep message").focusable(true).cursor(rune::Cursor::Pointer)
                             .on_press(|s: &mut State| s.deleting = None)
-                            .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, true))))))
-                    .children(s.replying.as_ref().map(|m| row().w_full().gap(8.0).items_center().pl(8.0).border_sides([0.0, 0.0, 0.0, 2.0], tok::accent(0, true))
+                            .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, dark()))))))
+                    .children(s.replying.as_ref().map(|m| row().w_full().gap(8.0).items_center().pl(8.0).border_sides([0.0, 0.0, 0.0, 2.0], tok::accent(0, dark()))
                         .child(col().grow(1.0).shrink().min_w(0.0)
                             .child(note(&format!("Replying to {}", m.sender)).font(type_::LABEL))
                             .child(text(m.text.replace('\n', " ")).font(type_::LABEL).color(t.text).truncate()))
                         .child(el().key("reply-cancel").role("button").label("Cancel reply").focusable(true).cursor(rune::Cursor::Pointer)
                             .on_press(|s: &mut State| s.replying = None)
-                            .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, true))))))
+                            .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, dark()))))))
                     .children(s.editing.is_some().then(|| row().w_full().gap(8.0).items_center()
                         .child(note("Editing message").font(type_::LABEL))
                         .child(el().key("edit-cancel").role("button").label("Cancel edit").focusable(true).cursor(rune::Cursor::Pointer)
                             .on_press(|s: &mut State| { s.editing = None; s.draft.clear(); })
-                            .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, true))))))
+                            .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, dark()))))))
                     .child(row().w_full().gap(8.0).items_end()
                         .child(col().grow(1.0).shrink().min_w(0.0).gap(8.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
                             .children((!s.pasted.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0)
@@ -1271,7 +1276,7 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             .child(if s.editor { note("Writing in the editor…") } else {
                                 auto_grow(draft_paste(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
                                     .placeholder("Type a message", t.text_secondary)
-                                    .caret(t.text, tok::accent(0, true).alpha(0.3))
+                                    .caret(t.text, tok::accent(0, dark()).alpha(0.3))
                                     .on_edit(|s: &mut State| &mut s.draft)
                                     .on_submit(|s: &mut State, _| if in_code_block(&s.draft.text[..s.draft.range().0]) { s.draft.insert("\n") } else { send(s) })), 1, 6)
                             }))
@@ -1284,14 +1289,59 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         .children(results)
 }
 
+/// The rail's theme button: each press steps System → Dark → Light → System.
+fn theme_button(theme: Option<bool>) -> El {
+    static SYSTEM: rune::Icon = rune::Icon {
+        name: "theme-system", view: 24.0,
+        body: r#"<rect x="3" y="4" width="18" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 20h8 M12 16v4" fill="none" stroke="currentColor" stroke-width="1.5"/>"#,
+    };
+    static DARK_ICON: rune::Icon = rune::Icon {
+        name: "theme-dark", view: 24.0,
+        body: r#"<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>"#,
+    };
+    static LIGHT_ICON: rune::Icon = rune::Icon {
+        name: "theme-light", view: 24.0,
+        body: r#"<circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M12 2v2 M12 20v2 M2 12h2 M20 12h2 M4.9 4.9l1.4 1.4 M17.7 17.7l1.4 1.4 M4.9 19.1l1.4-1.4 M17.7 6.3l1.4-1.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#,
+    };
+    let t = tok::theme(dark());
+    let (icon, label) = match theme {
+        None => (&SYSTEM, "System"),
+        Some(true) => (&DARK_ICON, "Dark"),
+        Some(false) => (&LIGHT_ICON, "Light"),
+    };
+    col().key("theme").role("button").label(format!("Theme: {label}")).focusable(true).w_full().center().gap(4.0).py(10.0).radius(6.0)
+        .hover(t.hover).cursor(rune::Cursor::Pointer)
+        .on_press(|s: &mut State| s.theme = next_theme(s.theme))
+        .child(rune::icon(icon, 24.0).color(t.text))
+        .child(text(label).font(type_::LABEL).color(t.text))
+}
+
+fn next_theme(theme: Option<bool>) -> Option<bool> {
+    match theme {
+        None => Some(true),
+        Some(true) => Some(false),
+        Some(false) => None,
+    }
+}
+
 const PANEL_MAX: f32 = 480.0;
 
 fn panel_width(start: f32, delta: f32) -> f32 {
     (start + delta).clamp(0.0, PANEL_MAX)
 }
 
-fn view(s: &State, _: &mut Cx<State>) -> El {
-    let t = tok::theme(true);
+thread_local! {
+    // Set once per frame by `view`, so helpers without the state paint in the picked theme.
+    static DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+fn dark() -> bool {
+    DARK.with(|d| d.get())
+}
+
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    DARK.with(|d| d.set(s.theme.unwrap_or_else(|| cx.system_dark())));
+    let t = tok::theme(dark());
     let title = |s: &str| text(s).font(type_::TITLE).color(t.text);
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary).wrap();
     let page = col().w_full().h_full().center().gap(14.0).padding(32.0).fill(t.bg);
@@ -1621,6 +1671,13 @@ mod tests {
         assert!(s.reply_highlight.is_none());
         assert!(s.reply_target.is_none());
         assert!(s.reply_error.is_none());
+    }
+
+    #[test]
+    fn theme_cycles_system_dark_light() {
+        assert_eq!(next_theme(None), Some(true));
+        assert_eq!(next_theme(Some(true)), Some(false));
+        assert_eq!(next_theme(Some(false)), None);
     }
 
     #[test]
