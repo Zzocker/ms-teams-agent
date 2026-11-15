@@ -56,7 +56,7 @@ failed requests show an error and a Retry button. Favorites are not shown.
 Headless runs use built-in demo data and never touch the network:
 
 ```sh
-ms-teams-agent --list-scenes                 # login error code main reply markdown preview image viewer teams loading search pick
+ms-teams-agent --list-scenes                 # login error code main reply edit markdown preview image viewer teams loading search pick
 ms-teams-agent --snap out.png --scene main   # render a screen to PNG
 ms-teams-agent --tree tree.json --scene main # element tree: roles, labels, text, rects
 ```

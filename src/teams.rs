@@ -84,6 +84,8 @@ pub struct Msg {
     pub links: Vec<(Range<usize>, String)>,
     /// Shared files that aren't pictures (documents, Loop pages, videos), shown as cards.
     pub files: Vec<File>,
+    /// The HTML it came as, for an edit to keep what the text doesn't hold (quote, pictures).
+    pub raw: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -162,6 +164,36 @@ pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String,
         "imdisplayname": s.user.name,
     });
     answer(agent().post(&url(s, &format!("conversations/{}/messages", encode(chat_id)))).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
+}
+
+/// Replaces a sent message's text with `text`, keeping its quoted reply and pictures, and adding
+/// `images` (from [`upload_image`]) after them.
+pub fn edit(s: &Session, chat_id: &str, server_id: &str, raw: &str, text: &str, images: &[(String, (u32, u32))]) -> Result<(), String> {
+    let body = serde_json::json!({
+        "content": edited_html(raw, text, images),
+        "messagetype": "RichText/Html",
+        "contenttype": "text",
+        "imdisplayname": s.user.name,
+    });
+    let url = url(s, &format!("conversations/{}/messages/{}", encode(chat_id), encode(server_id)));
+    answer(agent().put(&url).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
+}
+
+/// `raw`'s quoted reply, then `text`, then `raw`'s pictures and the new `images`.
+fn edited_html(raw: &str, text: &str, images: &[(String, (u32, u32))]) -> String {
+    let quote = raw.find("<blockquote").and_then(|start| {
+        let open_end = start + raw[start..].find('>')?;
+        let end = open_end + raw[open_end..].find("</blockquote>")? + "</blockquote>".len();
+        raw[start..open_end].contains("schema.skype.com/Reply").then(|| &raw[start..end])
+    }).unwrap_or("");
+    let pictures: String = raw.split("<img").skip(1).filter_map(|tag| tag.split_once('>').map(|(attrs, _)| attrs))
+        .filter(|attrs| attrs.contains("schema.skype.com/AMSImage"))
+        .map(|attrs| format!("<div><img{attrs}></div>"))
+        .collect();
+    let new = message_html(text, images);
+    // Pictures go after the text and before the new ones, as `message_html` places pictures.
+    let at = new.find("<div><img").unwrap_or(new.len());
+    format!("{quote}{}{pictures}{}", &new[..at], &new[at..])
 }
 
 /// A fresh client message id. The service drops a repeat of one, so it must differ per message.
@@ -450,6 +482,7 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
                 images,
                 links,
                 files,
+                raw: raw.into(),
             })
         })
         .collect();
@@ -671,7 +704,7 @@ mod tests {
     fn read_marker_keeps_server_and_client_message_ids_separate() {
         let message = super::Msg {
             id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
-            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![],
+            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(),
         };
         let marker = super::read_marker(&message, 999);
         assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
@@ -855,6 +888,17 @@ mod tests {
     }
 
     #[test]
+    fn edits_keep_the_quote_and_pictures() {
+        let quote = r#"<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1"><strong>A</strong><p>hi</p></blockquote>"#;
+        let pic = r#"<img src="https://eu-api.asm.skype.com/v1/objects/0-a/views/imgo" itemtype="http://schema.skype.com/AMSImage" style="width:4px">"#;
+        let raw = format!("{quote}<p>old</p><div>{pic}</div><img src=\"https://x/emoji.png\">");
+        let new = ("https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo".to_string(), (2, 3));
+        let html = super::edited_html(&raw, "new <text>", &[new]);
+        assert_eq!(html, format!(r#"{quote}new &lt;text&gt;<div>{pic}</div><div><img src="https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo" itemscope="" itemtype="http://schema.skype.com/AMSImage" style="width:2px; height:3px"></div>"#));
+        assert_eq!(super::edited_html("<p>plain</p>", "x", &[]), "x");
+    }
+
+    #[test]
     fn iso_dates() {
         assert_eq!(iso(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso(1_794_673_185_538), "2026-11-14T16:19:45.538Z");
@@ -863,7 +907,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![] };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new() };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);

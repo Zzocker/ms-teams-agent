@@ -56,11 +56,13 @@ struct State {
     older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
     draft: TextEdit,
+    /// The sent message the draft replaces when sent, as it was before the edit.
+    editing: Option<Msg>,
     /// Pictures pasted into the draft, with their decoded thumbnails; sent with it.
     pasted: Vec<(rune::ClipboardImage, rune::Image)>,
     /// A send in flight: the chat, the message's id, then its reloaded messages and the pictures'
-    /// URLs, or the error and the unsent text and pictures.
-    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, String, Vec<(rune::ClipboardImage, rune::Image)>)>)>,
+    /// URLs, or the error and the unsent text, pictures and edited message.
+    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, String, Vec<(rune::ClipboardImage, rune::Image)>, Option<Msg>)>)>,
     send_error: Option<String>,
     /// Filters the chat list by name.
     search: TextEdit,
@@ -93,6 +95,7 @@ fn init() -> State {
         loader: Latest::default(),
         older_loader: Latest::default(),
         draft: TextEdit::new(""),
+        editing: None,
         pasted: Vec::new(),
         sender: Latest::default(),
         send_error: None,
@@ -150,6 +153,7 @@ fn sign_out(s: &mut State) {
     s.loader.cancel();
     s.sender.cancel();
     s.draft.clear();
+    s.editing = None;
     s.search.clear();
     s.send_error = None;
     auth::sign_out();
@@ -168,6 +172,7 @@ fn navigate(s: &mut State, teams: bool) {
     s.selected = None;
     s.messages = None;
     s.draft.clear();
+    s.editing = None;
     s.send_error = None;
     if teams && s.teams.is_none() && !s.teams_loader.is_pending() {
         let Screen::Main { session, .. } = &s.screen else { return };
@@ -186,6 +191,7 @@ fn open_chat(s: &mut State, id: String) {
     if s.selected.as_ref() != Some(&id) {
         // A draft belongs to the chat it was written in; it must not follow to another one.
         s.draft.clear();
+        s.editing = None;
         s.send_error = None;
     }
     (s.selected, s.messages) = (Some(id.clone()), None);
@@ -234,7 +240,8 @@ fn load_older(s: &mut State) {
     });
 }
 
-/// Shows the draft in the selected chat at once and sends it, then reloads its messages.
+/// Shows the draft in the selected chat at once and sends it (or, while editing, puts it in place
+/// of the edited message's text), then reloads its messages.
 fn send(s: &mut State) {
     let (Screen::Main { session, .. }, Some(id)) = (&s.screen, &s.selected) else { return };
     let text = s.draft.text.trim().to_string();
@@ -252,21 +259,32 @@ fn send(s: &mut State) {
     for (key, (_, image)) in local.iter().zip(&pasted) {
         s.images.insert(key.clone(), Some(image.clone()));
     }
-    if let Some(Ok(page)) = &mut s.messages {
+    let editing = s.editing.take();
+    if let (Some(Ok(page)), Some(e)) = (&mut s.messages, &editing) {
+        if let Some(m) = page.msgs.iter_mut().find(|m| m.id == e.id) {
+            m.text = text.clone();
+            // Its link ranges point into the old text.
+            m.links.clear();
+            m.images.extend(local.iter().cloned());
+        }
+    } else if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: local, links: vec![], files: vec![] });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: local, links: vec![], files: vec![], raw: String::new() });
     }
     s.draft.clear();
     s.send_error = None;
-    s.sender.request((id, msg_id, text, pasted), move |(id, msg_id, text, pasted)| {
+    s.sender.request((id, msg_id, text, pasted, editing), move |(id, msg_id, text, pasted, editing)| {
         let sent = (|| {
             let urls = pasted.iter().map(|(png, _)| teams::upload_image(&session, &id, png.png())).collect::<Result<Vec<_>, _>>()?;
             let sized: Vec<_> = urls.iter().cloned().zip(pasted.iter().map(|(png, _)| png.size())).collect();
-            teams::send(&session, &id, &msg_id, &text, &sized).map(|()| urls)
+            match &editing {
+                Some(e) => teams::edit(&session, &id, &e.server_id, &e.raw, &text, &sized),
+                None => teams::send(&session, &id, &msg_id, &text, &sized),
+            }.map(|()| urls)
         })();
         let r = match sent {
             Ok(urls) => Ok((teams::messages(&session, &id), urls)),
-            Err(e) => Err((e, text, pasted)),
+            Err(e) => Err((e, text, pasted, editing)),
         };
         (id, msg_id, r)
     });
@@ -385,11 +403,18 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             }
             Ok(fresh) if here => s.messages = Some(fresh),
             Ok(_) => {}
-            Err((e, text, pasted)) => {
+            Err((e, text, pasted, editing)) => {
                 if let (true, Some(Ok(page))) = (here, &mut s.messages) {
                     page.msgs.retain(|m| m.id != msg_id);
+                    // An edit that failed shows the message as it was.
+                    if let Some(e) = &editing && let Some(m) = page.msgs.iter_mut().find(|m| m.id == e.id) {
+                        *m = e.clone();
+                    }
                 }
-                s.send_error = Some(format!("Not sent: {e}"));
+                s.send_error = Some(format!("Not {}: {e}", if editing.is_some() { "edited" } else { "sent" }));
+                if here && s.draft.text.is_empty() && s.editing.is_none() {
+                    s.editing = editing;
+                }
                 // Give the text back, unless the user moved on to another chat or draft.
                 if here && s.draft.text.is_empty() {
                     s.draft.replace_text(text);
@@ -995,11 +1020,24 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 } else {
                     line
                 };
-                let content = col().gap(4.0).shrink().min_w(0.0)
+                // Only a message the server has: an edit needs its id and HTML.
+                let edit = (m.mine && !m.server_id.is_empty()).then(|| {
+                    let m = m.clone();
+                    el().key(format!("edit/{}", m.id)).role("button").label("Edit message").focusable(true)
+                        .cursor(rune::Cursor::Pointer).on_press(move |s: &mut State| {
+                            s.draft.replace_text(m.text.clone());
+                            s.editing = Some(m.clone());
+                            s.send_error = None;
+                        })
+                        .child(note("Edit").font(type_::LABEL))
+                });
+                let content = col().gap(4.0).shrink().min_w(0.0);
+                let content = if m.mine { content.items_end() } else { content }
                     .children(head.then(|| row().gap(8.0).items_center()
                         .child(text(m.sender.as_str()).font(type_::LABEL).color(t.text_secondary))
                         .child(time)))
-                    .child(bubble);
+                    .child(bubble)
+                    .children(edit);
                 let line = if m.mine {
                     line.justify_end().items_end().child(content)
                 } else {
@@ -1026,6 +1064,11 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .child(col().w_full().max_w(1040.0).gap(6.0)
                     .children(s.reply_error.as_deref().map(|e| note(e).wrap()))
                     .children(s.send_error.as_deref().map(|e| note(e).wrap()))
+                    .children(s.editing.is_some().then(|| row().w_full().gap(8.0).items_center()
+                        .child(note("Editing message").font(type_::LABEL))
+                        .child(el().key("edit-cancel").role("button").label("Cancel edit").focusable(true).cursor(rune::Cursor::Pointer)
+                            .on_press(|s: &mut State| { s.editing = None; s.draft.clear(); })
+                            .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, true))))))
                     .child(row().w_full().gap(8.0).items_end()
                         .child(col().grow(1.0).shrink().min_w(0.0).gap(8.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
                             .children((!s.pasted.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0)
@@ -1080,7 +1123,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 
 fn demo(s: &mut State) {
     let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b" };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![], files: vec![] };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new() };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
@@ -1162,6 +1205,13 @@ fn main() {
                 demo(s);
                 if let Some(Ok(page)) = &mut s.messages {
                     page.msgs[0].text = teams::html_to_rich(r#"<pre class="language-markdown"><code>**Release&nbsp;checklist**<br><br>-&nbsp;Bump&nbsp;`version`&nbsp;in&nbsp;**Cargo.toml**<br>&nbsp;&nbsp;-&nbsp;then&nbsp;run&nbsp;*all*&nbsp;tests<br><br>```<br>cargo&nbsp;test&nbsp;--all-features<br>```<br><br>#&nbsp;Done</code></pre>"#).0;
+                }
+            }),
+            ("edit", |s| {
+                demo(s);
+                if let Some(Ok(page)) = &s.messages && let Some(m) = page.msgs.iter().rev().find(|m| m.mine).cloned() {
+                    s.draft = TextEdit::new(&format!("{} (edited)", m.text));
+                    s.editing = Some(m);
                 }
             }),
             #[cfg(feature = "markdown")]
