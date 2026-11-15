@@ -56,6 +56,12 @@ struct State {
     older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
     draft: TextEdit,
+    /// The draft open in the pop-up editor; its preview on, the writing side's share of the
+    /// editor's width, and that width as last laid out.
+    editor: bool,
+    editor_preview: bool,
+    editor_split: f32,
+    editor_w: f32,
     /// The sent message the draft replaces when sent, as it was before the edit.
     editing: Option<Msg>,
     /// Pictures pasted into the draft, with their decoded thumbnails; sent with it.
@@ -95,6 +101,10 @@ fn init() -> State {
         loader: Latest::default(),
         older_loader: Latest::default(),
         draft: TextEdit::new(""),
+        editor: false,
+        editor_preview: true,
+        editor_split: 0.75,
+        editor_w: 0.0,
         editing: None,
         pasted: Vec::new(),
         sender: Latest::default(),
@@ -154,6 +164,7 @@ fn sign_out(s: &mut State) {
     s.sender.cancel();
     s.draft.clear();
     s.editing = None;
+    s.editor = false;
     s.search.clear();
     s.send_error = None;
     auth::sign_out();
@@ -173,6 +184,7 @@ fn navigate(s: &mut State, teams: bool) {
     s.messages = None;
     s.draft.clear();
     s.editing = None;
+    s.editor = false;
     s.send_error = None;
     if teams && s.teams.is_none() && !s.teams_loader.is_pending() {
         let Screen::Main { session, .. } = &s.screen else { return };
@@ -192,6 +204,7 @@ fn open_chat(s: &mut State, id: String) {
         // A draft belongs to the chat it was written in; it must not follow to another one.
         s.draft.clear();
         s.editing = None;
+        s.editor = false;
         s.send_error = None;
     }
     (s.selected, s.messages) = (Some(id.clone()), None);
@@ -817,24 +830,78 @@ fn md_spans(md: &markdown::Md) -> Vec<rune::Span> {
     }).collect()
 }
 
-/// How a draft with a ``` block will read, as its bubble will show it, at most `max_h` tall;
-/// nothing for a draft without one.
+/// The draft as its bubble will show it.
 #[cfg(feature = "markdown")]
-fn draft_preview(draft: &str, max_h: f32) -> Option<El> {
-    let t = tok::theme(true);
-    draft.contains("```").then(|| {
-        let md = markdown::parse(draft);
-        let spans = md_spans(&md);
-        col().key("draft-preview").grow(1.0).min_w(0.0).max_h(max_h).gap(4.0).pl(12.0).border_sides([0.0, 0.0, 0.0, 1.0], t.separator)
-            .child(text("Preview").font(type_::LABEL).color(t.text_secondary))
-            .child(col().w_full().scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0)
-                .child(rune::rich(md.text, spans).font(type_::BODY).color(t.text).wrap_anywhere().selectable(true)))
-    })
+fn preview_text(draft: &str) -> El {
+    let md = markdown::parse(draft);
+    let spans = md_spans(&md);
+    rune::rich(md.text, spans)
 }
 
 #[cfg(not(feature = "markdown"))]
-fn draft_preview(_: &str, _: f32) -> Option<El> {
-    None
+fn preview_text(draft: &str) -> El {
+    text(draft)
+}
+
+/// The writing side's share after moving the divider `delta` points across `width`.
+fn editor_split(start: f32, delta: f32, width: f32) -> f32 {
+    if width <= 0.0 { return start }
+    (start + delta / width).clamp(0.2, 0.9)
+}
+
+/// The draft in a pop-up editor: the raw text on the left and, when on, how it will read on the
+/// right, split by a divider that drags. Escape or a click outside closes it; the draft stays.
+fn draft_editor(s: &State) -> Option<El> {
+    if !s.editor { return None }
+    let t = tok::theme(true);
+    let input = draft_paste(text_input(&s.draft, type_::BODY).key("editor-draft").label("Message").color(t.text)
+        .placeholder("Type a message", t.text_secondary)
+        .caret(t.text, tok::accent(0, true).alpha(0.3))
+        .autofocus()
+        .on_edit(|s: &mut State| &mut s.draft)
+        // Enter is a new line here; Send sends.
+        .on_submit(|s: &mut State, _| s.draft.insert("\n")));
+    let write = col().key("editor-write").h_full().min_w(0.0).padding(16.0).child(auto_grow(input, 1, 10_000));
+    let body = row().w_full().grow(1.0).min_h(0.0).on_layout(|s: &mut State, [_, _, w, _]| s.editor_w = w);
+    let body = if s.editor_preview {
+        let divider = col().key("editor-resize").w(8.0).h_full().center().cursor(rune::Cursor::ResizeColumn)
+            .label("Resize editor and preview with Left and Right arrows").focusable(true)
+            .on_key(|s: &mut State, e: &rune::KeyEvent, _| {
+                let delta = match e.key {
+                    rune::Key::Left => -20.0,
+                    rune::Key::Right => 20.0,
+                    _ => return false,
+                };
+                s.editor_split = editor_split(s.editor_split, delta, s.editor_w);
+                true
+            })
+            .on_drag(|s: &mut State, d: &mut Drag, _| {
+                if d.phase == Phase::Down { d.data = s.editor_split; }
+                s.editor_split = if d.cancelled() { d.data } else { editor_split(d.data, d.dx, s.editor_w) };
+            })
+            .child(el().w(1.0).h_full().fill(t.separator));
+        // Both sides grow from zero in the split's ratio, so it holds before the width is known.
+        body.child(write.w(0.0).grow(s.editor_split))
+            .child(divider)
+            .child(col().key("editor-preview").w(0.0).grow(1.0 - s.editor_split).min_w(160.0).h_full().padding(16.0).scroll(ScrollSpec { stick_bottom: false })
+                .child(preview_text(&s.draft.text).font(type_::BODY).color(t.text).wrap_anywhere().selectable(true)))
+    } else {
+        body.child(write.grow(1.0))
+    };
+    // Centred and capped, so the chat stays in sight around it on a large window.
+    Some(col().w_full().h_full().center().padding(64.0).fill(t.bg.alpha(0.7))
+        .child(col().key("draft-editor").label("Editor").w_full().max_w(1000.0).h_full().max_h(700.0).min_h(0.0).radius(12.0).fill(t.card).border(1.0, t.separator)
+            .modal(true, |s: &mut State| s.editor = false)
+            .child(row().w_full().gap(8.0).px(16.0).py(10.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+                .child(text("Editor").font(type_::TITLE).color(t.text).grow(1.0))
+                .child(el().key("editor-preview-toggle").role("button").label("Preview").focusable(true).px(12.0).py(6.0).radius(6.0)
+                    .fill(if s.editor_preview { t.press } else { t.control_off }).cursor(rune::Cursor::Pointer)
+                    .on_press(|s: &mut State| s.editor_preview = !s.editor_preview)
+                    .child(text(if s.editor_preview { "Preview on" } else { "Preview off" }).font(type_::LABEL).color(t.text)))
+                .child(button("editor-close", "Close", false, |s| s.editor = false)))
+            .child(body)
+            .child(row().w_full().justify_end().px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
+                .child(button("editor-send", "Send", true, |s| { s.editor = false; send(s) })))))
 }
 
 fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
@@ -1048,9 +1115,6 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .child(note(&message_date(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL)));
                 divider.into_iter().chain([line])
             });
-            // A side-by-side preview needs room for a block, so the box may grow taller then.
-            let lines = if s.draft.text.contains("```") { 12 } else { 6 };
-            let preview = draft_preview(&s.draft.text, lines as f32 * type_::BODY.line_px());
             pane.child(row().w_full().gap(10.0).px(16.0).py(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
                     .child(chats.iter().find(|c| &c.id == id).map_or_else(|| avatar(title, 32.0), |c| chat_avatar(s, c, &session.user.id, 32.0)))
                     .child(text(title).font(type_::TITLE).color(t.text).truncate()))
@@ -1073,14 +1137,15 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                         .child(col().grow(1.0).shrink().min_w(0.0).gap(8.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
                             .children((!s.pasted.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0)
                                 .children(s.pasted.iter().enumerate().map(|(i, (_, image))| pasted_image(image, i)))))
-                            // Writing on the left, and beside it how a draft with a ``` block will read.
-                            .child(row().w_full().gap(12.0)
-                                .child(col().grow(1.0).min_w(0.0).child(auto_grow(draft_paste(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
+                            // One box shows the draft at a time; behind the editor it would echo every key.
+                            .child(if s.editor { note("Writing in the editor…") } else {
+                                auto_grow(draft_paste(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
                                     .placeholder("Type a message", t.text_secondary)
                                     .caret(t.text, tok::accent(0, true).alpha(0.3))
                                     .on_edit(|s: &mut State| &mut s.draft)
-                                    .on_submit(|s: &mut State, _| if in_code_block(&s.draft.text[..s.draft.range().0]) { s.draft.insert("\n") } else { send(s) })), 1, lines)))
-                                .children(preview)))
+                                    .on_submit(|s: &mut State, _| if in_code_block(&s.draft.text[..s.draft.range().0]) { s.draft.insert("\n") } else { send(s) })), 1, 6)
+                            }))
+                        .child(button("editor", "Editor", false, |s| s.editor = true))
                         .child(button("send", "Send", true, send)))))
         }
     };
@@ -1117,7 +1182,8 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
             })),
         // Over the chat, not instead of it, so closing it leaves the messages scrolled where they were.
         Screen::Main { session, chats } => main_view(s, session, chats)
-            .children(image_viewer(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))),
+            .children(image_viewer(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))))
+            .children(draft_editor(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))),
     }
 }
 
@@ -1214,9 +1280,9 @@ fn main() {
                     s.editing = Some(m);
                 }
             }),
-            #[cfg(feature = "markdown")]
-            ("preview", |s| {
+            ("editor", |s| {
                 demo(s);
+                s.editor = true;
                 s.draft = TextEdit::new("this is in plain text\n```markdown\n# Here Markdown Starts\n- with **bold** and `code`\n```\n```sh\ncargo test\n```");
             }),
             #[cfg(feature = "image")]
@@ -1366,6 +1432,14 @@ mod tests {
         }
         assert_eq!(local_time("", "%I:%M %p"), "");
         assert_eq!(local_time("invalid", "%I:%M %p"), "invalid");
+    }
+
+    #[test]
+    fn editor_split_moves_by_share_of_width_and_stays_in_bounds() {
+        assert_eq!(super::editor_split(0.75, -100.0, 1000.0), 0.65);
+        assert_eq!(super::editor_split(0.75, 500.0, 1000.0), 0.9);
+        assert_eq!(super::editor_split(0.75, -900.0, 1000.0), 0.2);
+        assert_eq!(super::editor_split(0.75, 50.0, 0.0), 0.75);
     }
 
     #[test]
