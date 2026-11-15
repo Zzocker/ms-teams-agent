@@ -67,3 +67,33 @@ ms-teams-agent --list-scenes                 # login error code main reply edit 
 ms-teams-agent --snap out.png --scene main   # render a screen to PNG
 ms-teams-agent --tree tree.json --scene main # element tree: roles, labels, text, rects
 ```
+
+### Profile the real app (Linux)
+
+Sign in with the normal app first, then run from a graphical desktop session:
+
+```sh
+python3 scripts/profile.py
+# Offscreen rendering with the same real Teams data and read-only workload:
+python3 scripts/profile.py --headless
+# Or choose a new results directory:
+python3 scripts/profile.py --output /tmp/teams-profile-run-1
+```
+
+Headless results (November 15, 2026; debug build, 60 fps, 1000×680, scale 1):
+
+| Measurement | Result |
+|---|---:|
+| Duration | 161 seconds |
+| Chat opens / upward scroll actions | 12 / 36 |
+| RSS before opening chats | 211.3 MiB |
+| RSS after first pass | 346.4 MiB |
+| RSS after second pass / final | 366.5 MiB |
+| Peak RSS | 366.8 MiB |
+| Final PSS | 291.7 MiB |
+| Average CPU (% of one core) | 110.2% |
+| Read / write calls (including profiling overhead) | 22,183 / 19,752 |
+| Physical disk reads / writes | 0 / 8 KiB |
+| Recorded block-I/O delay (not per-call latency) | 0 ms |
+| Maximum loaded messages | 200 |
+| Estimated final image / avatar cache | 63.4 / 2.1 MiB |

@@ -284,6 +284,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         changed |= s.avatars.poll(session, ids, s.waker.clone().unwrap());
         #[cfg(feature = "image")]
         {
+            s.images.keep_full(s.viewer.as_deref());
             // The open picture's full size first, so it isn't queued behind the chat's previews.
             let urls = s.viewer.iter().map(|u| images::full(u)).chain(s.messages.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flat_map(|p| p.msgs.iter().flat_map(|m| m.images.iter().cloned().chain(m.files.iter().filter_map(|f| f.preview.clone())))));
             changed |= s.images.poll(session, urls, s.waker.clone().unwrap());

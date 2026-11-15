@@ -1,7 +1,9 @@
 //! Pictures in messages (the `image` feature), fetched from Teams' media store (and file previews
 //! from SharePoint) and kept in a
 //! memory LRU (the least recently shown are dropped past a budget) over a disk LRU, so a
-//! restart or an evicted picture reads the file instead of the network. No credentials are written.
+//! restart or an evicted picture reads the file instead of the network. Only previews stay in
+//! memory: a full-size picture is held while the viewer shows it, then read from disk on the next
+//! click. No credentials are written.
 use crate::auth::{Session, agent};
 use rune::{Image, ImageCache, Latest, Waker};
 use std::{cell::Cell, collections::HashMap, path::{Path, PathBuf}, time::SystemTime};
@@ -9,8 +11,9 @@ use std::{cell::Cell, collections::HashMap, path::{Path, PathBuf}, time::SystemT
 /// Bytes of files kept on disk; the least recently used go first.
 const DISK_BUDGET: u64 = 512 * 1024 * 1024;
 
-/// Decoded pixels kept: about a dozen full-size screenshots, or hundreds of previews.
-const BUDGET: u64 = 256 * 1024 * 1024;
+/// Decoded preview pixels kept, plus the one full-size picture open. Small, because the disk cache
+/// brings an evicted picture back without the network.
+const BUDGET: u64 = 64 * 1024 * 1024;
 
 /// Previews are tens of KB and full-size screenshots a few MB; a body this big is neither.
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
@@ -35,9 +38,10 @@ struct Entry {
     used: Cell<u64>,
 }
 
-/// Decoded RGBA bytes; a failure holds none.
+/// Decoded RGBA bytes, plus the third more Rune's mip chain takes; a failure holds none.
+// shortcut: an animation's later frames aren't counted (Rune doesn't expose them); count them if GIF-heavy chats still grow.
 fn cost(image: &Option<Image>) -> u64 {
-    image.as_ref().and_then(Image::size).map_or(0, |[w, h]| u64::from(w) * u64::from(h) * 4)
+    image.as_ref().and_then(Image::size).map_or(0, |[w, h]| u64::from(w) * u64::from(h) * 4 * 4 / 3)
 }
 
 impl Images {
@@ -47,6 +51,12 @@ impl Images {
         self.clock.set(self.clock.get() + 1);
         entry.used.set(self.clock.get());
         Some(entry.image.as_ref())
+    }
+
+    /// Drop every full-size picture but `open`'s, the one the viewer shows.
+    pub fn keep_full(&mut self, open: Option<&str>) {
+        let open = open.map(full);
+        self.images.retain(|url, _| !url.contains("/views/imgpsh_fullsize_anim") || open.as_deref() == Some(url.as_str()));
     }
 
     pub fn insert(&mut self, url: String, image: Option<Image>) {
@@ -157,17 +167,32 @@ mod tests {
     #[test]
     fn evicts_least_recently_shown_first() {
         let cache = ImageCache::new(std::sync::Arc::new(|| {}));
-        let image = || Some(cache.rgba(4, 4, vec![0u8; 64])); // 64 bytes decoded, decoded inline
+        let image = || Some(cache.rgba(4, 4, vec![0u8; 64])); // 64 bytes decoded (85 with mips), decoded inline
         let mut images = Images::default();
         for url in ["a", "b", "c"] {
             images.insert(url.into(), image());
         }
         images.insert("failed".into(), None);
         images.get("a"); // now b is the oldest picture
-        images.evict(128);
+        images.evict(170);
         assert!(images.get("b").is_none());
         assert!(images.get("a").is_some() && images.get("c").is_some());
         assert!(matches!(images.get("failed"), Some(None)), "failures hold no pixels and aren't evicted");
+    }
+
+    #[test]
+    fn full_size_pictures_leave_memory_when_the_viewer_moves_on() {
+        let cache = ImageCache::new(std::sync::Arc::new(|| {}));
+        let mut images = Images::default();
+        let (a, b) = ("https://h/v1/objects/0-a/views/imgo", "https://h/v1/objects/0-b/views/imgo");
+        for url in [a.to_owned(), full(a), b.to_owned(), full(b)] {
+            images.insert(url, Some(cache.rgba(1, 1, vec![0u8; 4])));
+        }
+        images.keep_full(Some(b));
+        assert!(images.get(&full(a)).is_none() && images.get(&full(b)).is_some());
+        images.keep_full(None);
+        assert!(images.get(&full(b)).is_none());
+        assert!(images.get(a).is_some() && images.get(b).is_some(), "previews stay");
     }
 
     #[test]
