@@ -67,8 +67,20 @@ struct State {
     /// Pictures pasted into the draft, with their decoded thumbnails; sent with it.
     pasted: Vec<(rune::ClipboardImage, rune::Image)>,
     /// A send in flight: the chat, the message's id, then its reloaded messages and the pictures'
-    /// URLs, or the error and the unsent text, pictures and edited message.
-    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, String, Vec<(rune::ClipboardImage, rune::Image)>, Option<Msg>)>)>,
+    /// URLs, or the error and the unsent text, pictures, and edited and quoted messages.
+    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, String, Vec<(rune::ClipboardImage, rune::Image)>, (Option<Msg>, Option<Msg>))>)>,
+    /// The message the draft replies to when sent.
+    replying: Option<Msg>,
+    /// The message whose "…" menu is open, by id.
+    menu: Option<String>,
+    /// The message under the pointer, and the one whose toolbar is under it, by id. The toolbar
+    /// reaches over the row above, so it wins: only one message's toolbar shows.
+    hovered: Option<String>,
+    hovered_bar: Option<String>,
+    /// The message waiting for the user to confirm its deletion.
+    deleting: Option<Msg>,
+    /// A delete in flight: the chat, the message's id, and how it went.
+    deleter: Latest<(String, String, Result<(), String>)>,
     send_error: Option<String>,
     /// Filters the chat list by name.
     search: TextEdit,
@@ -108,6 +120,12 @@ fn init() -> State {
         editing: None,
         pasted: Vec::new(),
         sender: Latest::default(),
+        replying: None,
+        menu: None,
+        hovered: None,
+        hovered_bar: None,
+        deleting: None,
+        deleter: Latest::default(),
         send_error: None,
         search: TextEdit::new(""),
         chat_bar: Bar::default(),
@@ -165,6 +183,7 @@ fn sign_out(s: &mut State) {
     s.draft.clear();
     s.editing = None;
     s.editor = false;
+    (s.replying, s.menu, s.deleting) = (None, None, None);
     s.search.clear();
     s.send_error = None;
     auth::sign_out();
@@ -185,6 +204,7 @@ fn navigate(s: &mut State, teams: bool) {
     s.draft.clear();
     s.editing = None;
     s.editor = false;
+    (s.replying, s.menu, s.deleting) = (None, None, None);
     s.send_error = None;
     if teams && s.teams.is_none() && !s.teams_loader.is_pending() {
         let Screen::Main { session, .. } = &s.screen else { return };
@@ -205,6 +225,7 @@ fn open_chat(s: &mut State, id: String) {
         s.draft.clear();
         s.editing = None;
         s.editor = false;
+        (s.replying, s.menu, s.deleting) = (None, None, None);
         s.send_error = None;
     }
     (s.selected, s.messages) = (Some(id.clone()), None);
@@ -273,6 +294,7 @@ fn send(s: &mut State) {
         s.images.insert(key.clone(), Some(image.clone()));
     }
     let editing = s.editing.take();
+    let replying = s.replying.take();
     if let (Some(Ok(page)), Some(e)) = (&mut s.messages, &editing) {
         if let Some(m) = page.msgs.iter_mut().find(|m| m.id == e.id) {
             m.text = text.clone();
@@ -282,22 +304,22 @@ fn send(s: &mut State) {
         }
     } else if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: None, images: local, links: vec![], files: vec![], raw: String::new() });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links: vec![], files: vec![], raw: String::new() });
     }
     s.draft.clear();
     s.send_error = None;
-    s.sender.request((id, msg_id, text, pasted, editing), move |(id, msg_id, text, pasted, editing)| {
+    s.sender.request((id, msg_id, text, pasted, editing, replying), move |(id, msg_id, text, pasted, editing, replying)| {
         let sent = (|| {
             let urls = pasted.iter().map(|(png, _)| teams::upload_image(&session, &id, png.png())).collect::<Result<Vec<_>, _>>()?;
             let sized: Vec<_> = urls.iter().cloned().zip(pasted.iter().map(|(png, _)| png.size())).collect();
             match &editing {
                 Some(e) => teams::edit(&session, &id, &e.server_id, &e.raw, &text, &sized),
-                None => teams::send(&session, &id, &msg_id, &text, &sized),
+                None => teams::send(&session, &id, &msg_id, &text, &sized, replying.as_ref()),
             }.map(|()| urls)
         })();
         let r = match sent {
             Ok(urls) => Ok((teams::messages(&session, &id), urls)),
-            Err(e) => Err((e, text, pasted, editing)),
+            Err(e) => Err((e, text, pasted, (editing, replying))),
         };
         (id, msg_id, r)
     });
@@ -321,6 +343,7 @@ fn setup(s: &mut State, waker: Waker) {
     s.loader.set_waker(waker.clone());
     s.sender.set_waker(waker.clone());
     s.older_loader.set_waker(waker.clone());
+    s.deleter.set_waker(waker.clone());
     s.waker = Some(waker);
     // The app has no arguments of its own; any argument is Rune's headless tooling, which gets no network.
     if std::env::args().len() == 1 {
@@ -393,6 +416,15 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             }
         }
     }
+    if let Some((id, msg_id, r)) = s.deleter.take() {
+        match r {
+            Ok(()) => if let (true, Some(Ok(page))) = (s.selected.as_ref() == Some(&id), &mut s.messages) {
+                page.msgs.retain(|m| m.id != msg_id);
+            },
+            Err(e) => s.send_error = Some(format!("Not deleted: {e}")),
+        }
+        changed = true;
+    }
     if let Some((id, msg_id, r)) = s.sender.take() {
         let here = s.selected.as_ref() == Some(&id);
         let r = r.map(|(fresh, urls)| {
@@ -416,7 +448,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             }
             Ok(fresh) if here => s.messages = Some(fresh),
             Ok(_) => {}
-            Err((e, text, pasted, editing)) => {
+            Err((e, text, pasted, (editing, replying))) => {
                 if let (true, Some(Ok(page))) = (here, &mut s.messages) {
                     page.msgs.retain(|m| m.id != msg_id);
                     // An edit that failed shows the message as it was.
@@ -425,8 +457,8 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                     }
                 }
                 s.send_error = Some(format!("Not {}: {e}", if editing.is_some() { "edited" } else { "sent" }));
-                if here && s.draft.text.is_empty() && s.editing.is_none() {
-                    s.editing = editing;
+                if here && s.draft.text.is_empty() && s.editing.is_none() && s.replying.is_none() {
+                    (s.editing, s.replying) = (editing, replying);
                 }
                 // Give the text back, unless the user moved on to another chat or draft.
                 if here && s.draft.text.is_empty() {
@@ -756,6 +788,84 @@ fn in_code_block(before_caret: &str) -> bool {
     before_caret.lines().filter(|l| l.trim_start().starts_with("```")).count() % 2 == 1
 }
 
+/// Puts `m`'s text in the box to replace it when sent.
+fn start_edit(s: &mut State, m: &Msg) {
+    s.draft.replace_text(m.text.clone());
+    (s.editing, s.replying, s.menu) = (Some(m.clone()), None, None);
+    s.send_error = None;
+}
+
+/// Quotes `m` above the box, so the next send replies to it.
+fn start_reply(s: &mut State, m: &Msg) {
+    // A reply is a new message: an edit's text isn't its draft.
+    if s.editing.take().is_some() { s.draft.clear(); }
+    (s.replying, s.menu) = (Some(m.clone()), None);
+    s.send_error = None;
+}
+
+/// Deletes the message the user confirmed; it leaves the list once Teams has deleted it.
+fn delete_message(s: &mut State) {
+    let (Screen::Main { session, .. }, Some(id), Some(m)) = (&s.screen, &s.selected, s.deleting.take()) else { return };
+    let session = session.clone();
+    s.send_error = None;
+    s.deleter.request((id.clone(), m), move |(id, m)| {
+        let r = teams::delete(&session, &id, &m.server_id);
+        (id, m.id, r)
+    });
+}
+
+/// The hover toolbar of a message the server has (its actions need its id): edit for one of
+/// mine, quote (reply) for someone else's, and "…" for the rest. It stays shown while its menu is open.
+// shortcut: no reactions yet; add their buttons here when the client can send them.
+fn message_actions(m: &Msg, shown: bool) -> Option<El> {
+    static PENCIL: rune::Icon = rune::Icon { name: "msg-edit", view: 20.0, body: r#"<path d="M13.5 3.5l3 3L7 16H4v-3z M11.5 5.5l3 3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
+    static QUOTE: rune::Icon = rune::Icon { name: "msg-quote", view: 20.0, body: r#"<path d="M4 11.5c0-3 1.5-5 4-5.5 M4 11.5h3.5v3.5H4z M11 11.5c0-3 1.5-5 4-5.5 M11 11.5h3.5v3.5H11z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
+    static MORE: rune::Icon = rune::Icon { name: "msg-more", view: 20.0, body: r#"<circle cx="5" cy="10" r="1.3" fill="currentColor"/><circle cx="10" cy="10" r="1.3" fill="currentColor"/><circle cx="15" cy="10" r="1.3" fill="currentColor"/>"# };
+    if m.server_id.is_empty() { return None }
+    let t = tok::theme(true);
+    let button = |key: String, label: &'static str, icon: &'static rune::Icon| el().key(key).size(28.0, 28.0).center().radius(6.0)
+        .role("button").label(label).focusable(true).cursor(rune::Cursor::Pointer).hover(t.hover)
+        .child(rune::icon(icon, 16.0).color(t.text));
+    let first = {
+        let m = m.clone();
+        if m.mine {
+            button(format!("edit/{}", m.id), "Edit message", &PENCIL).on_press(move |s: &mut State| start_edit(s, &m))
+        } else {
+            button(format!("quote/{}", m.id), "Reply", &QUOTE).on_press(move |s: &mut State| start_reply(s, &m))
+        }
+    };
+    let id = m.id.clone();
+    let more = button(format!("more/{}", m.id), "More options", &MORE)
+        .hover(t.hover)
+        .on_press(move |s: &mut State| s.menu = if s.menu.as_ref() == Some(&id) { None } else { Some(id.clone()) });
+    Some(row().gap(2.0).padding(3.0).radius(8.0).fill(t.card).border(1.0, t.separator)
+        .shadow(2.0, 8.0, rune::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 })
+        // Shown for the hovered message (or its open menu); a hovered group without it is the row
+        // above the pointer, which the toolbar of the one below overlaps.
+        .group_opacity(if shown { 1.0 } else { 0.0 }, if shown { 1.0 } else { 0.0 })
+        .child(first).child(more))
+}
+
+/// The open "…" menu, under its button: copy, plus reply, edit and delete for one of mine
+/// (someone else's has reply in the toolbar).
+fn message_menu(s: &State) -> Option<El> {
+    let id = s.menu.as_deref()?;
+    let m = s.messages.as_ref()?.as_ref().ok()?.msgs.iter().find(|m| m.id == id)?;
+    let t = tok::theme(true);
+    let item = |key: &'static str, label: &'static str| row().key(key).role("menuitem").label(label).focusable(true)
+        .w_full().px(12.0).py(6.0).radius(4.0).cursor(rune::Cursor::Pointer).hover(t.hover)
+        .child(text(label).font(type_::BODY).color(t.text));
+    let (reply, copy, edit, delete) = (m.clone(), m.text.clone(), m.clone(), m.clone());
+    Some(col().key("message-menu").role("menu").label("Message options").min_w(160.0).padding(4.0).radius(8.0)
+        .fill(t.card).border(1.0, t.separator).shadow(4.0, 16.0, rune::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.4 })
+        .anchored(format!("more/{id}"), Side::Bottom, Align::End, 4.0)
+        .modal(true, |s: &mut State| s.menu = None)
+        .children(m.mine.then(|| item("menu-reply", "Reply").on_press(move |s: &mut State| start_reply(s, &reply))))
+        .child(item("menu-copy", "Copy text").on_press_tx(move |s: &mut State, tx| { tx.copy(copy.clone()); s.menu = None; }))
+        .children(m.mine.then(|| item("menu-edit", "Edit").on_press(move |s: &mut State| start_edit(s, &edit))))
+        .children(m.mine.then(|| item("menu-delete", "Delete").on_press(move |s: &mut State| { s.deleting = Some(delete.clone()); s.menu = None; }))))
+}
+
 /// A picture waiting in the draft, with a button to take it out.
 fn pasted_image(image: &rune::Image, i: usize) -> El {
     static CLOSE: rune::Icon = rune::Icon { name: "pasted-remove", view: 16.0, body: r#"<path d="M4 4l8 8 M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"# };
@@ -1081,30 +1191,35 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .children((!m.files.is_empty()).then(|| col().gap(8.0).mt(if m.text.is_empty() && m.images.is_empty() { 0.0 } else { 8.0 })
                         .children(m.files.iter().map(|f| file_card(s, f)))));
                 // Keyed by id, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
-                let line = row().key(format!("msg/{}", m.id)).arrives_whole().w_full().gap(8.0).pt(if head { 12.0 } else { 0.0 });
+                let hover_id = m.id.clone();
+                let line = row().key(format!("msg/{}", m.id)).hover_group_shared(format!("msg/{}", m.id)).arrives_whole()
+                    .on_hover_change(move |s: &mut State, on, _| {
+                        if on { s.hovered = Some(hover_id.clone()) } else if s.hovered.as_ref() == Some(&hover_id) { s.hovered = None }
+                    }).w_full().gap(8.0).pt(if head { 12.0 } else { 0.0 });
                 let line = if edge == Some(i) {
                     line.on_visible(|s: &mut State, on, _| if on { load_older(s) })
                 } else {
                     line
                 };
                 // Only a message the server has: an edit needs its id and HTML.
-                let edit = (m.mine && !m.server_id.is_empty()).then(|| {
-                    let m = m.clone();
-                    el().key(format!("edit/{}", m.id)).role("button").label("Edit message").focusable(true)
-                        .cursor(rune::Cursor::Pointer).on_press(move |s: &mut State| {
-                            s.draft.replace_text(m.text.clone());
-                            s.editing = Some(m.clone());
-                            s.send_error = None;
+                // Over the bubble's top-right corner while the message is hovered (or focused), as in Teams.
+                // The toolbar reaches above the row, so it shares the row's hover: the pointer on it
+                // keeps this message's actions, not the one above.
+                let shown = s.menu.as_ref() == Some(&m.id) || s.hovered_bar.as_ref().or(s.hovered.as_ref()) == Some(&m.id);
+                let bar_id = m.id.clone();
+                let actions = message_actions(m, shown)
+                    .map(|a| el().hover_group_shared(format!("msg/{}", m.id)).pin(None, Some(-30.0), Some(0.0), None)
+                        .on_hover_change(move |s: &mut State, on, _| {
+                            if on { s.hovered_bar = Some(bar_id.clone()) } else if s.hovered_bar.as_ref() == Some(&bar_id) { s.hovered_bar = None }
                         })
-                        .child(note("Edit").font(type_::LABEL))
-                });
+                        .child(a));
+                let bubble = bubble.children(actions);
                 let content = col().gap(4.0).shrink().min_w(0.0);
                 let content = if m.mine { content.items_end() } else { content }
                     .children(head.then(|| row().gap(8.0).items_center()
                         .child(text(m.sender.as_str()).font(type_::LABEL).color(t.text_secondary))
                         .child(time)))
-                    .child(bubble)
-                    .children(edit);
+                    .child(bubble);
                 let line = if m.mine {
                     line.justify_end().items_end().child(content)
                 } else {
@@ -1128,6 +1243,21 @@ fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .child(col().w_full().max_w(1040.0).gap(6.0)
                     .children(s.reply_error.as_deref().map(|e| note(e).wrap()))
                     .children(s.send_error.as_deref().map(|e| note(e).wrap()))
+                    .children(s.deleting.as_ref().map(|m| row().w_full().gap(12.0).items_center()
+                        .child(note(&format!("Delete \"{}\"?", m.text.chars().take(60).collect::<String>())).font(type_::LABEL).truncate().shrink().min_w(0.0))
+                        .child(el().key("delete-confirm").role("button").label("Delete message").focusable(true).cursor(rune::Cursor::Pointer)
+                            .on_press(delete_message)
+                            .child(text("Delete").font(type_::LABEL).color(rune::Color { r: 0.95, g: 0.35, b: 0.35, a: 1.0 })))
+                        .child(el().key("delete-cancel").role("button").label("Keep message").focusable(true).cursor(rune::Cursor::Pointer)
+                            .on_press(|s: &mut State| s.deleting = None)
+                            .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, true))))))
+                    .children(s.replying.as_ref().map(|m| row().w_full().gap(8.0).items_center().pl(8.0).border_sides([0.0, 0.0, 0.0, 2.0], tok::accent(0, true))
+                        .child(col().grow(1.0).shrink().min_w(0.0)
+                            .child(note(&format!("Replying to {}", m.sender)).font(type_::LABEL))
+                            .child(text(m.text.replace('\n', " ")).font(type_::LABEL).color(t.text).truncate()))
+                        .child(el().key("reply-cancel").role("button").label("Cancel reply").focusable(true).cursor(rune::Cursor::Pointer)
+                            .on_press(|s: &mut State| s.replying = None)
+                            .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, true))))))
                     .children(s.editing.is_some().then(|| row().w_full().gap(8.0).items_center()
                         .child(note("Editing message").font(type_::LABEL))
                         .child(el().key("edit-cancel").role("button").label("Cancel edit").focusable(true).cursor(rune::Cursor::Pointer)
@@ -1183,7 +1313,8 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
         // Over the chat, not instead of it, so closing it leaves the messages scrolled where they were.
         Screen::Main { session, chats } => main_view(s, session, chats)
             .children(image_viewer(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))))
-            .children(draft_editor(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))),
+            .children(draft_editor(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))))
+            .children(message_menu(s)),
     }
 }
 
@@ -1206,6 +1337,7 @@ fn demo(s: &mut State) {
         msg("Charles Babbage", "Did you get a chance to look at the notes?", "2026-11-14T10:20:00Z", false),
         msg("Ada Lovelace", "Yes. Note G is done: it computes the Bernoulli numbers.\nI'll send it tonight.", "2026-11-14T10:24:00Z", true),
         msg("Charles Babbage", "The engine needs another column of gears, I think", "2026-11-14T10:31:00Z", false),
+        msg("Charles Babbage", "And a faster carry.", "2026-11-14T10:32:00Z", false),
     ] }));
 }
 
@@ -1279,6 +1411,10 @@ fn main() {
                     s.draft = TextEdit::new(&format!("{} (edited)", m.text));
                     s.editing = Some(m);
                 }
+            }),
+            ("menu", |s| {
+                demo(s);
+                s.menu = s.messages.as_ref().and_then(|r| r.as_ref().ok()).and_then(|p| p.msgs.iter().rev().find(|m| m.mine)).map(|m| m.id.clone());
             }),
             ("editor", |s| {
                 demo(s);

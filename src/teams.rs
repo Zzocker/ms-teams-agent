@@ -155,15 +155,40 @@ pub fn upload_image(s: &Session, chat_id: &str, png: &[u8]) -> Result<String, St
 
 /// Sends `text` and pictures (from [`upload_image`], with their pixel sizes) to a chat as the signed-in user.
 /// `id` is from [`new_msg_id`].
-pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String, (u32, u32))]) -> Result<(), String> {
+/// Posts a message; with `quote`, as a reply quoting it.
+pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String, (u32, u32))], quote: Option<&Msg>) -> Result<(), String> {
     let body = serde_json::json!({
-        "content": message_html(text, images),
+        "content": format!("{}{}", quote.map(reply_html).unwrap_or_default(), message_html(text, images)),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "clientmessageid": id,
         "imdisplayname": s.user.name,
     });
     answer(agent().post(&url(s, &format!("conversations/{}/messages", encode(chat_id)))).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
+}
+
+/// Deletes a sent message; Teams keeps a "This message has been deleted" stub.
+pub fn delete(s: &Session, chat_id: &str, server_id: &str) -> Result<(), String> {
+    let url = url(s, &format!("conversations/{}/messages/{}", encode(chat_id), encode(server_id)));
+    let response = agent().delete(&url).header("Authentication", &auth(s)).call().map_err(|e| e.to_string())?;
+    match response.status() {
+        st if st.is_success() => Ok(()),
+        st if st == 401 => Err("Teams session expired; restart the app.".into()),
+        st => Err(format!("chat service {st}")),
+    }
+}
+
+/// The quote block Teams puts before a reply's text, which [`reply_content`] reads back.
+fn reply_html(m: &Msg) -> String {
+    let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let mri = if m.sender_id.starts_with("28:") { m.sender_id.clone() } else { format!("8:orgid:{}", m.sender_id) };
+    let ms = chrono::DateTime::parse_from_rfc3339(&m.time).map(|t| t.timestamp_millis().to_string()).unwrap_or_default();
+    // Teams quotes a preview, not the whole message.
+    let preview: String = m.text.chars().take(200).collect();
+    format!(
+        r#"<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="{}"><strong itemprop="mri" itemid="{}">{}</strong><span itemprop="time" itemid="{ms}"></span><p itemprop="preview">{}</p></blockquote>"#,
+        escape(&m.server_id), escape(&mri), escape(&m.sender), escape(&preview).replace('\n', " "),
+    )
 }
 
 /// Replaces a sent message's text with `text`, keeping its quoted reply and pictures, and adding
@@ -885,6 +910,19 @@ mod tests {
         assert_eq!(m[0].text, "look <here>");
         assert_eq!(m[0].images, [url]);
         assert_eq!(message_html("", &[]), "");
+    }
+
+    #[test]
+    fn replies_quote_as_teams_does_and_read_back() {
+        let m = super::Msg {
+            id: "c1".into(), server_id: "1700000000000".into(), sender: "Bob <B>".into(), sender_id: "oid-1".into(),
+            text: "first\nsecond".into(), time: "2026-11-14T10:24:00Z".into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(),
+        };
+        let html = format!("{}{}", super::reply_html(&m), super::message_html("ok", &[]));
+        assert!(html.contains(r#"itemid="8:orgid:oid-1""#));
+        let (reply, (text, _)) = super::reply_content(&html);
+        assert_eq!(reply, Some(super::Reply { id: "1700000000000".into(), sender: "Bob <B>".into(), time: "2026-11-14T10:24:00.000Z".into(), text: "first second".into() }));
+        assert_eq!(text, "ok");
     }
 
     #[test]
