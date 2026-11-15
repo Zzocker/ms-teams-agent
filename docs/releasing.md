@@ -6,8 +6,8 @@ Run commands from the repository root.
 
 1. Update `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, and commit both with your changes. The first release uses the existing `0.1.0` version.
 2. Open a release PR from `main` into `release` and wait for PR tests and release builds to pass.
-3. Merge the PR. The push to `release` tests and packages every platform. After all builds succeed, CI creates the matching tag (for example `v0.1.0`) on that exact commit and creates one **draft preview release** with all four archives, checksums and generated notes. No manual tagging is needed.
-4. Review the draft, download and smoke-test its packages, and edit the notes with known issues. Publish it from GitHub Releases when ready.
+3. Merge the PR. The push to `release` tests and packages every platform. After all builds succeed, CI creates the matching tag (for example `v0.1.0`) on that exact commit and publishes a **full release**, marked as latest, with all four archives, checksums and generated notes. No manual tagging or publication is needed.
+4. The published release is immediately available to users and the app's update checker. Download and smoke-test its packages, and add any known issues to its release notes.
 
 Only published releases appear in update checks. Bump the version for every subsequent release
 (for example `0.1.1`, automatically tagged as `v0.1.1`). CI refuses to move an existing tag to a

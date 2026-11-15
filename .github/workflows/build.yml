@@ -86,7 +86,7 @@ jobs:
           pattern: package-*
           merge-multiple: true
           path: dist
-      - name: Create complete draft preview release
+      - name: Publish full release
         working-directory: dist
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,4 +94,4 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           sha256sum *.tar.gz *.zip > SHA256SUMS
-          gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --generate-notes ./*.tar.gz ./*.zip SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --latest --generate-notes ./*.tar.gz ./*.zip SHA256SUMS
