@@ -80,20 +80,15 @@ python3 scripts/profile.py --headless
 python3 scripts/profile.py --output /tmp/teams-profile-run-1
 ```
 
-Headless results (November 15, 2026; debug build, 60 fps, 1000×680, scale 1):
+Final headless results — updated November 15, 2026, 12:00 PM IST.
 
 | Measurement | Result |
 |---|---:|
-| Duration | 161 seconds |
-| Chat opens / upward scroll actions | 12 / 36 |
-| RSS before opening chats | 211.3 MiB |
-| RSS after first pass | 346.4 MiB |
-| RSS after second pass / final | 366.5 MiB |
-| Peak RSS | 366.8 MiB |
-| Final PSS | 291.7 MiB |
-| Average CPU (% of one core) | 110.2% |
-| Read / write calls (including profiling overhead) | 22,183 / 19,752 |
-| Physical disk reads / writes | 0 / 8 KiB |
-| Recorded block-I/O delay (not per-call latency) | 0 ms |
-| Maximum loaded messages | 200 |
-| Estimated final image / avatar cache | 63.4 / 2.1 MiB |
+| Workload | 12 chat opens / 36 upward scroll actions |
+| RSS before opening chats | 210.7 MiB |
+| RSS after second pass, before cleanup | 277.6 MiB |
+| Peak RSS | 277.8 MiB |
+| Live Rust allocations before cleanup | 53.6 MiB |
+| Preview cache before cleanup | 16 images / 19.9 MiB |
+| Final RSS after diagnostic cache clearing and `malloc_trim` | 241.7 MiB |
+| Average CPU (% of one core, including profiling overhead) | 96.0% |

@@ -39,6 +39,8 @@ pub(crate) fn sign_out(s: &mut State) {
     s.avatars = Default::default();
     #[cfg(feature = "image")]
     { s.images = Default::default(); }
+    #[cfg(feature = "image")]
+    s.preview_rows.clear();
     s.reply_highlight = None;
     s.reply_target = None;
     s.reply_error = None;
@@ -61,6 +63,8 @@ pub(crate) fn sign_out(s: &mut State) {
 }
 
 pub(crate) fn navigate(s: &mut State, teams: bool) {
+    #[cfg(feature = "image")]
+    s.preview_rows.clear();
     s.reply_highlight = None;
     s.reply_target = None;
     s.reply_error = None;
@@ -83,6 +87,8 @@ pub(crate) fn navigate(s: &mut State, teams: bool) {
 }
 
 pub(crate) fn open_chat(s: &mut State, id: String) {
+    #[cfg(feature = "image")]
+    s.preview_rows.clear();
     s.reply_highlight = None;
     s.reply_target = None;
     s.reply_error = None;

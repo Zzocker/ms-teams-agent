@@ -1,3 +1,5 @@
+static PROFILE_CLEARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 // Appended only to the temporary profiling copy by profile.py.
 #[derive(Default)]
 struct ProfileDriver {
@@ -6,6 +8,7 @@ struct ProfileDriver {
     next_action: u64,
     step: usize,
     chats: Vec<String>,
+    cleanup: u8,
 }
 
 fn profile_tick(s: &mut State, tx: &mut Tx) -> bool {
@@ -18,7 +21,7 @@ fn profile_tick(s: &mut State, tx: &mut Tx) -> bool {
         let mut d = driver.borrow_mut();
         let elapsed = d.started.get_or_insert_with(Instant::now).elapsed();
         let second = elapsed.as_secs();
-        if second > 240 {
+        if second > 330 {
             eprintln!("PROFILE_ERROR timed out waiting for sign-in or message requests");
             std::process::exit(2);
         }
@@ -29,10 +32,14 @@ fn profile_tick(s: &mut State, tx: &mut Tx) -> bool {
             .map(|m| m.text.len() + m.raw.len()).sum();
         let read = |name| std::fs::read_to_string(format!("/proc/self/{name}"))
             .expect("could not read process profiling counters");
+        let (previews, full_size, failed) = s.images.profile_counts();
         eprintln!("PROFILE {}", serde_json::json!({
             "elapsed": elapsed.as_secs_f64(), "step": d.step,
+            "phase": match d.cleanup { 0 => "loaded", 1 => "images_cleared", 2 => "caches_cleared", _ => "trimmed" },
+            "allocations": profile_allocations(),
             "messages": page.map_or(0, |p| p.msgs.len()),
             "message_text_bytes": text_bytes,
+            "image_previews": previews, "image_full_size": full_size, "image_failed": failed,
             "image_bytes": s.images.profile_bytes(),
             "avatar_bytes": s.avatars.profile_bytes(),
             "smaps": read("smaps_rollup"), "stat": read("stat"), "io": read("io"),
@@ -67,8 +74,33 @@ fn profile_tick(s: &mut State, tx: &mut Tx) -> bool {
         }
         let actions = d.chats.len() * 4 * 2;
         if d.step >= actions {
-            eprintln!("PROFILE_DONE");
-            std::process::exit(0);
+            match d.cleanup {
+                0 => {
+                    PROFILE_CLEARED.store(true, SeqCst);
+                    s.images = Default::default();
+                    eprintln!("PROFILE_PHASE images_cleared");
+                }
+                1 => {
+                    s.avatars = Default::default();
+                    s.messages = None;
+                    s.selected = None;
+                    s.viewer = None;
+                    s.loader = Default::default();
+                    s.older_loader = Default::default();
+                    eprintln!("PROFILE_PHASE caches_cleared");
+                }
+                2 => {
+                    let released = unsafe { malloc_trim(0) };
+                    eprintln!("PROFILE_PHASE trimmed released={released}");
+                }
+                _ => {
+                    eprintln!("PROFILE_DONE");
+                    std::process::exit(0);
+                }
+            }
+            d.cleanup += 1;
+            d.next_action = second + 30;
+            return true;
         }
         let step = d.step;
         d.step += 1;

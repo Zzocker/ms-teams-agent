@@ -2,6 +2,19 @@
 
 use crate::*;
 
+/// Queue only media near the viewport; layout reports don't rebuild the view on every scroll frame.
+#[cfg(feature = "image")]
+pub(crate) fn nearby_previews(s: &State) -> impl Iterator<Item = String> + '_ {
+    let [vx, vy, vw, vh] = s.preview_viewport.get();
+    s.messages.as_ref().and_then(|r| r.as_ref().ok()).into_iter()
+        .flat_map(|p| &p.msgs)
+        .filter(move |m| s.preview_rows.get(&m.id).is_some_and(|&[x, y, w, h]| {
+            vw > 0.0 && vh > 0.0 && w > 0.0 && h > 0.0 && x < vx + vw && x + w > vx
+                && y < vy + vh + 200.0 && y + h > vy - 200.0
+        }))
+        .flat_map(|m| m.images.iter().cloned().chain(m.files.iter().filter_map(|f| f.preview.clone())))
+}
+
 /// A picture's tile in a message, as Teams lays them out side by side.
 #[cfg(feature = "image")]
 pub(crate) const IMAGE_TILE: (f32, f32) = (256.0, 198.0);
@@ -124,4 +137,63 @@ pub(crate) fn file_card(s: &State, f: &teams::File) -> El {
             .child(rune::icon(&DOC, 24.0).color(tint))
             .child(text(f.name.as_str()).font(type_::TITLE).color(t.text).truncate().min_w(0.0)))
         .child(body)
+}
+
+#[cfg(all(test, feature = "image"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_queue_follows_viewport_with_scroll_margin() {
+        let mut s = init();
+        demo(&mut s);
+        let page = s.messages.as_mut().unwrap().as_mut().unwrap();
+        for (i, m) in page.msgs.iter_mut().enumerate() {
+            m.images = vec![format!("image{i}")];
+        }
+        page.msgs[1].files.push(teams::File {
+            name: "Notes".into(), kind: "docx".into(), url: "file".into(), preview: Some("document".into()),
+        });
+        let ids: Vec<_> = page.msgs.iter().map(|m| m.id.clone()).collect();
+        for (id, y) in ids.iter().zip([-500.0, -100.0, 500.0, 900.0]) {
+            s.preview_rows.insert(id.clone(), [0.0, y, 300.0, 100.0]);
+        }
+        assert!(nearby_previews(&s).next().is_none(), "wait for viewport layout");
+        s.preview_viewport.set([0.0, 100.0, 300.0, 400.0]);
+        assert_eq!(nearby_previews(&s).collect::<Vec<_>>(), ["image1", "document", "image2"]);
+        s.preview_viewport.set([0.0, 800.0, 300.0, 400.0]);
+        assert_eq!(nearby_previews(&s).collect::<Vec<_>>(), ["image3"]);
+        s.preview_rows.insert(ids[0].clone(), [0.0, -500.0, 300.0, 2000.0]);
+        assert_eq!(nearby_previews(&s).collect::<Vec<_>>(), ["image0", "image3"], "tall rows still load");
+        s.preview_rows.insert(ids[0].clone(), [500.0, 800.0, 300.0, 100.0]);
+        assert_eq!(nearby_previews(&s).collect::<Vec<_>>(), ["image3"], "horizontally clipped rows stay unloaded");
+        s.preview_rows.clear();
+        assert!(nearby_previews(&s).next().is_none(), "old chat geometry cannot queue new previews");
+    }
+
+    #[test]
+    fn drawn_media_rows_follow_scrolling() {
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let Screen::Main { session, chats } = &s.screen else { unreachable!() };
+            main_view(s, session, chats)
+        }
+        let mut s = init();
+        demo(&mut s);
+        let template = s.messages.as_ref().unwrap().as_ref().unwrap().msgs[0].clone();
+        s.messages.as_mut().unwrap().as_mut().unwrap().msgs = (0..20).map(|i| {
+            let mut m = template.clone();
+            m.id = format!("row{i}");
+            m.images = vec![format!("image{i}")];
+            m
+        }).collect();
+        let mut rt = rune::Runtime::new(s, view, (1200.0, 800.0), rune::Env::new(true, 1.0));
+        for _ in 0..5 { rt.frame(1.0 / 60.0); }
+        let initial = nearby_previews(&rt.state).collect::<Vec<_>>();
+        assert!(!initial.is_empty() && initial.len() < 20, "only nearby rows: {initial:?}");
+        rt.wheel_event(WheelEvent::new(0.0, 10000.0).at(950.0, 300.0));
+        for _ in 0..180 { rt.frame(1.0 / 60.0); }
+        let scrolled = nearby_previews(&rt.state).collect::<Vec<_>>();
+        assert!(!scrolled.is_empty() && scrolled.len() < 20);
+        assert_ne!(initial, scrolled, "scrolling changes the preview queue");
+    }
 }

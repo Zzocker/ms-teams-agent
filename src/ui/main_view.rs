@@ -187,6 +187,14 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .on_hover_change(move |s: &mut State, on, _| {
                         if on { s.hovered = Some(hover_id.clone()) } else if s.hovered.as_ref() == Some(&hover_id) { s.hovered = None }
                     }).w_full().gap(8.0).pt(if head { 12.0 } else { 0.0 });
+                #[cfg(feature = "image")]
+                let line = if !m.images.is_empty() || m.files.iter().any(|f| f.preview.is_some()) {
+                    let id = m.id.clone();
+                    line.on_drawn_layout_tx(move |s: &mut State, rect, tx| {
+                        s.preview_rows.insert(id.clone(), rect);
+                        tx.live_only();
+                    })
+                } else { line };
                 let line = if edge == Some(i) {
                     line.on_visible(|s: &mut State, on, _| if on { load_older(s) })
                 } else {
@@ -221,15 +229,18 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .child(note(&message_date(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL)));
                 divider.into_iter().chain([line])
             });
+            let list = col().w_full().items_center().px(16.0).py(8.0)
+                .child(col().w_full().max_w(1040.0).gap(4.0).growth(GrowthSpec::default())
+                    .children(bubbles)
+                    .children(msgs.is_empty().then(|| note("No messages."))))
+                .scroll(ScrollSpec { stick_bottom: true }).scroll_anchor().grow(1.0).min_h(0.0);
+            #[cfg(feature = "image")]
+            let list = list.drawn_rect_into(&s.preview_viewport);
             pane.child(row().w_full().gap(10.0).px(16.0).py(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
                     .child(chats.iter().find(|c| &c.id == id).map_or_else(|| avatar(title, 32.0), |c| chat_avatar(s, c, &session.user.id, 32.0)))
                     .child(text(title).font(type_::TITLE).color(t.text).truncate()))
                 // A growth stack, so a sent message and the viewport following it glide in as one.
-                .child(with_bar("messages", col().w_full().items_center().px(16.0).py(8.0)
-                    .child(col().w_full().max_w(1040.0).gap(4.0).growth(GrowthSpec::default())
-                        .children(bubbles)
-                        .children(msgs.is_empty().then(|| note("No messages."))))
-                    .scroll(ScrollSpec { stick_bottom: true }).scroll_anchor().grow(1.0).min_h(0.0), &s.msg_bar))
+                .child(with_bar("messages", list, &s.msg_bar))
                 .child(col().w_full().items_center().px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
                     .child(col().w_full().max_w(1040.0).gap(6.0)
                     .children(s.reply_error.as_deref().map(|e| note(e).wrap()))

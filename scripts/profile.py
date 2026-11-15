@@ -37,7 +37,11 @@ def prepare(destination, headless=False):
             raise ValueError('Headless sign-in/media hooks changed; refusing to profile demo data')
         source = source.replace(guard, 'true')
     source = replace_once(source, '    if let Some((id, link, r)) = s.older_loader.take() {', '    if let Some((id, link, r)) = s.older_loader.take() {\n        if let Err(error) = &r { eprintln!(\"PROFILE_ERROR older: {error}\"); }')
-    path.write_text(source + '\n' + (ROOT / 'scripts/profile_driver.rs').read_text())
+    # Stop background media reloads once the cache-clear experiment begins.
+    source = replace_once(source, 'if true && let Screen::Main { session, chats } = &s.screen {' if headless else 'if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {',
+                          'if !PROFILE_CLEARED.load(SeqCst) && let Screen::Main { session, chats } = &s.screen {')
+    path.write_text(source + '\n' + (ROOT / 'scripts/profile_driver.rs').read_text()
+                    + '\n' + (ROOT / 'scripts/profile_alloc.rs').read_text())
     # Fail closed if these handlers move; disable user-initiated writes in this copy too.
     for filename, signatures in {
         'src/actions.rs': ('pub(crate) fn sign_out(s: &mut State) {',
@@ -56,6 +60,12 @@ def prepare(destination, headless=False):
 impl Images {
     pub(crate) fn profile_bytes(&self) -> u64 {
         self.images.values().map(|e| cost(&e.image)).sum()
+    }
+
+    pub(crate) fn profile_counts(&self) -> (usize, usize, usize) {
+        let previews = self.images.iter().filter(|(url, e)| e.image.is_some() && !url.contains("/views/imgpsh_fullsize_anim")).count();
+        let full = self.images.values().filter(|e| e.image.is_some()).count() - previews;
+        (previews, full, self.images.len() - previews - full)
     }
 }
 ''')
@@ -97,9 +107,19 @@ def export(log, output, exit_code, headless=False):
     action_count = sum(line.startswith('PROFILE_ACTION') for line in lines)
     baseline = next((r for r in reversed(rows) if r['step'] == 0), first)
     def pass_rss(step):
-        sample = next((r for r in reversed(rows) if r['step'] == step), None)
+        sample = next((r for r in reversed(rows) if r['step'] == step and r.get('phase', 'loaded') == 'loaded'), None)
         return memory(sample, 'Rss') if sample else None
 
+    phases = {}
+    for row in rows:
+        phase = row.get('phase', 'loaded')
+        phases[phase] = {
+            'elapsed': row['elapsed'], 'rss_mib': memory(row, 'Rss'),
+            'image_previews': row.get('image_previews'),
+            'image_mib': row['image_bytes'] / 1024**2,
+            'avatar_mib': row['avatar_bytes'] / 1024**2,
+            'allocations': row.get('allocations'),
+        }
     done = 'PROFILE_DONE' in lines and exit_code == 0
     errors = [line for line in lines if line.startswith('PROFILE_ERROR')]
     report = {
@@ -117,6 +137,10 @@ def export(log, output, exit_code, headless=False):
         'pss_mib_final': memory(last, 'Pss'),
         'max_loaded_messages': max(r['messages'] for r in rows),
         'max_message_text_html_bytes': max(r['message_text_bytes'] for r in rows),
+        'phase_endpoints': phases,
+        'image_cache_counts': {key: {'final': last.get(key),
+                                     'peak': max((r[key] for r in rows if key in r), default=None)}
+                               for key in ('image_previews', 'image_full_size', 'image_failed')},
         'estimated_image_cache_mib_final': last['image_bytes'] / 1024**2,
         'estimated_avatar_cache_mib_final': last['avatar_bytes'] / 1024**2,
         'cpu_seconds': round(cpu(last) - cpu(first), 2),
@@ -131,17 +155,20 @@ def export(log, output, exit_code, headless=False):
             'I/O counters and CPU include profiler overhead: three proc-file reads and one log write per second; driver wakes four times/second.',
             'Recorded block-I/O delay is not per-call or network latency; zero may mean delay accounting is disabled.',
             'Image estimates exclude extra animation frames/GPU allocations. Text size excludes capacities, metadata and layout.',
+            'Allocation counters cover Rust System allocations, not native-library or GPU allocations; glibc totals include native malloc users. No allocation stacks are recorded. Counters are sampled concurrently.',
+            'Cache clearing affects memory only; background media polling is disabled during idle. malloc_trim is a diagnostic intervention, not normal app behavior.',
             'This short run cannot prove a leak or attribute all memory without allocation-stack profiling.',
             'Headless mode renders offscreen at fixed 60 fps with no window/compositor presentation. GPU backend and memory can differ; compare results within the same mode.',
         ],
     }
     (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
-    columns = ['elapsed', 'step', 'messages', 'message_text_bytes', 'rss_mib', 'pss_mib', 'image_bytes', 'avatar_bytes']
+    columns = ['elapsed', 'step', 'messages', 'message_text_bytes', 'rss_mib', 'pss_mib', 'image_bytes', 'avatar_bytes', 'image_previews', 'image_full_size', 'image_failed', 'phase', 'rust_live_bytes', 'rust_peak_bytes', 'rust_allocated_bytes', 'rust_freed_bytes', 'glibc_used_bytes', 'glibc_free_arena_bytes']
     with (output / 'samples.csv').open('w', newline='') as stream:
         writer = csv.DictWriter(stream, fieldnames=columns)
         writer.writeheader()
         for row in rows:
             writer.writerow({**{k: row[k] for k in columns if k in row},
+                             **{k: v for k, v in row.get('allocations', {}).items() if k in columns},
                              'rss_mib': memory(row, 'Rss'), 'pss_mib': memory(row, 'Pss')})
     print(json.dumps(report, indent=2))
     print(f'\nResults: {output}')
@@ -165,16 +192,16 @@ def main():
         command = ['cargo', 'build', '--locked', '--manifest-path', str(work / 'Cargo.toml'),
                    '--bin', 'ms-teams-agent-profile', '--target-dir', str(ROOT / 'target')]
         subprocess.run(command, check=True, timeout=600)
-        print(f'Running two passes through up to six already-read chats ({"headless" if args.headless else "desktop"}). Allow about three minutes.', flush=True)
+        print(f'Running two passes through up to six already-read chats ({"headless" if args.headless else "desktop"}). Allow about four minutes including cache-clear idle phases.', flush=True)
         app_command = [str(ROOT / 'target/debug/ms-teams-agent-profile')]
         if args.headless:
-            app_command += ['--duration', '250', '--realtime', '--fps', '60', '--scale', '1', '--size', '1000x680']
+            app_command += ['--duration', '340', '--realtime', '--fps', '60', '--scale', '1', '--size', '1000x680']
         else:
             print('Leave the profiling window alone.', flush=True)
         with (output / 'run.log').open('w') as log:
             child = subprocess.Popen(app_command, stdout=log, stderr=log, cwd=ROOT)
             try:
-                code = child.wait(timeout=300)
+                code = child.wait(timeout=390)
             except (subprocess.TimeoutExpired, KeyboardInterrupt):
                 child.terminate()
                 try:

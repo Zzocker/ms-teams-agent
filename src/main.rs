@@ -39,6 +39,10 @@ struct State {
     avatars: avatars::Avatars,
     #[cfg(feature = "image")]
     images: images::Images,
+    #[cfg(feature = "image")]
+    preview_rows: std::collections::HashMap<String, [f32; 4]>,
+    #[cfg(feature = "image")]
+    preview_viewport: Live<[f32; 4]>,
     panel_width: f32,
     /// The picked theme: `None` follows the system, else dark or light.
     theme: Option<bool>,
@@ -104,6 +108,10 @@ fn init() -> State {
         avatars: Default::default(),
         #[cfg(feature = "image")]
         images: Default::default(),
+        #[cfg(feature = "image")]
+        preview_rows: Default::default(),
+        #[cfg(feature = "image")]
+        preview_viewport: Live::new([0.0; 4]),
         panel_width: PANEL_MAX,
         theme: None,
         viewer: None,
@@ -284,10 +292,14 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         changed |= s.avatars.poll(session, ids, s.waker.clone().unwrap());
         #[cfg(feature = "image")]
         {
+            if changed {
+                let page = s.messages.as_ref().and_then(|r| r.as_ref().ok());
+                s.preview_rows.retain(|id, _| page.is_some_and(|p| p.msgs.iter().any(|m| &m.id == id)));
+            }
             s.images.keep_full(s.viewer.as_deref());
             // The open picture's full size first, so it isn't queued behind the chat's previews.
-            let urls = s.viewer.iter().map(|u| images::full(u)).chain(s.messages.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flat_map(|p| p.msgs.iter().flat_map(|m| m.images.iter().cloned().chain(m.files.iter().filter_map(|f| f.preview.clone())))));
-            changed |= s.images.poll(session, urls, s.waker.clone().unwrap());
+            let urls = s.viewer.iter().map(|u| images::full(u)).chain(nearby_previews(s)).collect::<Vec<_>>();
+            changed |= s.images.poll(session, urls.into_iter(), s.waker.clone().unwrap());
         }
         tx.wake_after(std::time::Duration::from_secs(60));
     }
