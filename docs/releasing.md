@@ -4,15 +4,23 @@
 
 Run commands from the repository root.
 
-1. Update `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, and commit both with your changes.
-2. Push a matching tag, for example `git tag v0.1.0` then `git push origin v0.1.0`.
-3. Wait for the build workflow. It tests and packages every platform, then creates one **draft preview release** with all four archives, checksums and generated notes. A failed build prevents release creation.
-4. Review the draft, download and smoke-test its packages, and edit the notes with known issues. Publish it from GitHub Releases when ready.
+1. Update `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, and commit both with your changes. The first release uses the existing `0.1.0` version.
+2. Open a release PR from `main` into `release` and wait for PR tests and release builds to pass.
+3. Merge the PR. The push to `release` tests and packages every platform. After all builds succeed, CI creates the matching tag (for example `v0.1.0`) on that exact commit and publishes a **full release**, marked as latest, with all four archives, checksums and generated notes. No manual tagging or publication is needed.
+4. The published release is immediately available to users and the app's update checker. Download and smoke-test its packages, and add any known issues to its release notes.
 
-Only published releases appear in update checks. Use a new version and tag for each subsequent
-release (for example `0.1.1` / `v0.1.1`). The workflow refuses tags that disagree with `Cargo.toml`
-and never overwrites an existing release. To retry a failed release upload, remove its incomplete
-draft before rerunning the release job. A published release should stay unchanged.
+Only published releases appear in update checks. Bump the version for every subsequent release
+(for example `0.1.1`, automatically tagged as `v0.1.1`). CI refuses to move an existing tag to a
+different commit and never overwrites an existing release. A failed platform build prevents both
+tagging and release creation. Pull requests run tests and builds without creating tags or releases.
+
+If release creation fails after tagging, rerun the failed release job: CI accepts an existing tag
+only when it points to the same tested commit. If the failed upload left an incomplete draft,
+remove that draft before retrying. A published release should stay unchanged.
+
+You can also run the build workflow manually from GitHub Actions with the `release` branch
+selected. Manual runs on other branches build packages without creating a tag or release.
+Pushing a tag manually does not trigger this workflow.
 
 To package a local build without publishing:
 
