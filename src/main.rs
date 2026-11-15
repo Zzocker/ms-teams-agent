@@ -10,6 +10,7 @@ mod images;
 #[cfg(feature = "markdown")]
 mod markdown;
 mod teams;
+mod notifications;
 mod ui;
 
 use actions::*;
@@ -61,6 +62,17 @@ struct State {
     attempt: Arc<AtomicU64>,
     events: (mpsc::Sender<(u64, Screen)>, mpsc::Receiver<(u64, Screen)>),
     waker: Option<Waker>,
+    updates: (mpsc::SyncSender<(u64, teams::events::Update)>, mpsc::Receiver<(u64, teams::events::Update)>),
+    live_attempt: Option<u64>,
+    live_status: Option<String>,
+    notifications: Option<mpsc::SyncSender<(u64, String, String, String)>>,
+    window: Option<rune::AppHandle<State>>,
+    window_focused: bool,
+    window_visible: bool,
+    reader: Latest<(String, String, Result<(), String>)>,
+    live_baseline: std::collections::HashMap<String, String>,
+    delivered: std::collections::VecDeque<(String, String)>,
+    loading_updates: Vec<(String, Option<Msg>)>,
     selected: Option<String>,
     /// The selected chat's messages; `None` while they load.
     messages: Option<Messages>,
@@ -126,6 +138,17 @@ fn init() -> State {
         attempt: Arc::default(),
         events: mpsc::channel(),
         waker: None,
+        updates: mpsc::sync_channel(128),
+        live_attempt: None,
+        live_status: None,
+        notifications: None,
+        window: None,
+        window_focused: false,
+        window_visible: true,
+        reader: Latest::default(),
+        live_baseline: Default::default(),
+        delivered: Default::default(),
+        loading_updates: Vec::new(),
         selected: None,
         messages: None,
         loader: Latest::default(),
@@ -157,9 +180,11 @@ fn setup(s: &mut State, waker: Waker) {
     s.sender.set_waker(waker.clone());
     s.older_loader.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
+    s.reader.set_waker(waker.clone());
     s.waker = Some(waker);
     // The app has no arguments of its own; any argument is Rune's headless tooling, which gets no network.
     if std::env::args().len() == 1 {
+        notifications::start(s);
         sign_in(s, false);
     }
 }
@@ -188,8 +213,26 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         if let Screen::Code { url, .. } = &screen {
             let _ = tx.open_url(url); // the URL is also on screen if no browser opens
         }
-        s.screen = screen;
+        if let (Screen::Main { chats: old, .. }, Screen::Main { chats: named, .. }) = (&mut s.screen, &screen) {
+            for chat in old {
+                if let Some(named) = named.iter().find(|c| c.id == chat.id) {
+                    chat.title = named.title.clone();
+                    chat.avatar_id = named.avatar_id.clone();
+                    chat.avatar_members = named.avatar_members.clone();
+                }
+            }
+        } else {
+            s.screen = screen;
+        }
         changed = true;
+    }
+    if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
+        let mine = s.attempt.load(SeqCst);
+        if s.live_attempt != Some(mine) {
+            s.live_attempt = Some(mine);
+            s.live_baseline = chats.iter().map(|c| (c.id.clone(), c.time.clone())).collect();
+            teams::events::listen(session.clone(), s.attempt.clone(), mine, s.updates.0.clone(), s.waker.clone().unwrap());
+        }
     }
     if let Some(result) = s.teams_loader.take() {
         s.teams = Some(result);
@@ -197,14 +240,26 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     }
     if let Some((id, r, read)) = s.loader.take() {
         if s.selected.as_ref() == Some(&id) {
-            if r.is_ok() && read.is_ok() && let Screen::Main { chats, .. } = &mut s.screen
+            if r.is_ok() && read.is_ok() && notifications::chat_open(s, &id) && let Screen::Main { chats, .. } = &mut s.screen
                 && let Some(chat) = chats.iter_mut().find(|chat| chat.id == id) {
-                chat.unread = false;
+                // A message arriving after this request's read marker still needs acknowledging.
+                if r.as_ref().ok().and_then(|p| p.msgs.last()).is_some_and(|m| m.time >= chat.time) {
+                    chat.unread = false;
+                }
             }
             if let Err(error) = read {
                 s.reply_error = Some(format!("Could not save read status: {error}. Reopen the chat to retry."));
             }
-            s.messages = Some(r);
+            s.messages = Some(match (s.messages.take(), r) {
+                (Some(Ok(pushed)), Ok(loaded)) => Ok(teams::merge(pushed, loaded)),
+                (_, result) => result,
+            });
+            if let Some(Ok(page)) = &mut s.messages {
+                for (server_id, message) in s.loading_updates.drain(..) {
+                    notifications::apply_message(page, &server_id, message);
+                }
+            } else { s.loading_updates.clear(); }
+            notifications::mark_selected_read(s);
             changed = true;
         }
     }
@@ -284,6 +339,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
+    changed |= notifications::poll(s);
     if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
         let ids = std::iter::once(session.user.id.clone())
             .chain(chats.iter().map(|c| chat_avatar_id(c, &session.user.id).to_owned()))
@@ -349,14 +405,28 @@ fn main() {
     // Linux takes the icon from assets/linux/ms-teams-agent.desktop, matched by this id; macOS and Windows from icon.png.
     rune::set_app_id("ms-teams-agent");
     rune::set_app_icon(include_bytes!("../assets/icons/icon.png").as_slice()).expect("icon.png is a PNG");
-    rune::run(AppSpec::<State> {
+    let desktop = std::env::args().len() == 1;
+    if desktop && !rune::single_instance("ms-teams-agent") { return; }
+    let mut app = rune::App::new(AppSpec::<State> {
         scenes: SCENES,
         setup: Some(setup),
         poll: Some(poll),
         min_size: Some((640.0, 400.0)),
         families: ("Inter", "ui-monospace"),
         ..AppSpec::new("Teams", (1000.0, 680.0), init, view)
+    }).on_focus(notifications::focus).on_visibility(notifications::visibility)
+        .on_close(|s, _| { s.window_visible = false; s.window_focused = false; })
+        .on_quit(|s, _| { s.attempt.fetch_add(1, SeqCst); });
+    let handle = app.handle();
+    app = app.init(move || {
+        let mut s = init();
+        s.window = Some(handle);
+        s
     });
+    let tray = if desktop { notifications::tray(app.handle()).map_err(|e| eprintln!("Teams tray unavailable: {e}")).ok() } else { None };
+    if desktop { app = app.keep_running().release_gpu_when_closed().standard_menus(); }
+    app.run();
+    drop(tray);
 }
 
 #[cfg(test)]

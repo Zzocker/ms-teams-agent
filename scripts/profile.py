@@ -30,6 +30,12 @@ def prepare(destination, headless=False):
     path = destination / 'src/main.rs'
     source = replace_once(path.read_text(), '    changed || revealed\n}',
                           '    changed | revealed | profile_tick(s, tx)\n}')
+    # Profiling never registers push endpoints, shows notifications, or keeps a hidden app alive.
+    source = replace_once(source, '        notifications::start(s);\n', '')
+    source = replace_once(source, '    let desktop = std::env::args().len() == 1;', '    let desktop = false;')
+    source = replace_once(source,
+                          'if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {\n        let mine =',
+                          'if false && let Screen::Main { session, chats } = &s.screen {\n        let mine =')
     if headless:
         # Only this profiling copy may use real sessions with Rune's headless arguments.
         guard = 'std::env::args().len() == 1'

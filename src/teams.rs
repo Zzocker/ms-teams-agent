@@ -8,6 +8,7 @@ use std::ops::Range;
 mod html;
 mod media;
 mod parse;
+pub mod events;
 
 pub use html::*;
 pub use media::*;
@@ -183,12 +184,16 @@ fn iso(ms: i64) -> String {
 /// doesn't drop pages scrolled back to.
 pub fn merge(old: Page, fresh: Page) -> Page {
     let Some(first) = fresh.msgs.first() else { return fresh };
+    let last = &fresh.msgs.last().unwrap().time;
+    let mut newer: Vec<Msg> = old.msgs.iter().filter(|m| m.time > *last
+        && !fresh.msgs.iter().any(|f| f.id == m.id)).cloned().collect();
     let mut msgs: Vec<Msg> = old.msgs.into_iter()
         .filter(|m| m.time < first.time && !fresh.msgs.iter().any(|f| f.id == m.id))
         .collect();
     // Kept rows reach back to `old`'s start, so its link is the one before them.
     let older = if msgs.is_empty() { fresh.older } else { old.older };
     msgs.extend(fresh.msgs);
+    msgs.append(&mut newer);
     Page { msgs, older }
 }
 
@@ -342,5 +347,14 @@ mod tests {
         let p = merge(old, fresh);
         assert_eq!(p.msgs.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "sent"]);
         assert_eq!(p.older.as_deref(), Some("before-a"));
+    }
+
+    #[test]
+    fn merge_keeps_push_messages_newer_than_a_fetch_in_flight() {
+        let m = |id: &str| Msg { id:id.into(), server_id:id.into(), sender:String::new(), sender_id:String::new(),
+            text:id.into(), time:id.into(), mine:false, reply:None, images:vec![], links:vec![], files:vec![], raw:String::new() };
+        let old = Page { msgs:vec![m("1"), m("3")], older:Some("older".into()) };
+        let fetched = Page { msgs:vec![m("1"), m("2")], older:Some("older".into()) };
+        assert_eq!(merge(old, fetched).msgs.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);
     }
 }

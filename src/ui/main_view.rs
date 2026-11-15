@@ -97,6 +97,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let sidebar = col().key("sidebar").w(s.panel_width).min_w(0.0).h_full().min_h(0.0)
         .motion(rune::Spring::NONE).clip_rounded(0.0).fill(t.card)
         .child(header)
+        .children(s.live_status.as_deref().map(|status| note(status).wrap().padding(12.0)))
         .child(text(if s.show_teams { "Teams" } else { "Chat" }).font(type_::TITLE).color(t.text).padding(12.0))
         .child(list);
     let divider = col().key("panel-resize").w(8.0).h_full().center().fill(t.card)

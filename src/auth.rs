@@ -21,12 +21,10 @@ pub struct User {
 pub struct Session {
     pub user: User,
     /// `Authentication: skypetoken=…` for the chat service.
-    // shortcut: lasts about 24 h and isn't renewed while the app stays open; restart the app after that.
     pub skype_token: String,
     /// The user's region's chat service, e.g. `https://apac.ng.msg.teams.microsoft.com`.
     pub chat_service: String,
     /// `Authorization: Bearer …` for the middle tier (profiles).
-    // shortcut: lasts about an hour and isn't renewed; names of chats opened later may stay unresolved.
     pub access: String,
     /// The user's region's middle tier, e.g. `https://teams.microsoft.com/api/mt/apac`.
     pub middle_tier: String,
@@ -101,7 +99,10 @@ fn save(refresh: &str) -> Result<(), String> {
     o.open(&path).and_then(|mut f| f.write_all(refresh.as_bytes())).map_err(|e| format!("couldn't save the session: {e}"))
 }
 
+static SESSION_UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn sign_out() {
+    let _guard = SESSION_UPDATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Ok(p) = session_file() {
         let _ = std::fs::remove_file(p);
     }
@@ -180,6 +181,22 @@ pub fn resume() -> Result<Option<Session>, String> {
             Ok(None)
         }
     }
+}
+
+/// Renew the background connection without restoring a session that signed out during the request.
+pub fn renew(live: impl Fn() -> bool) -> Result<Session, String> {
+    let refresh = std::fs::read_to_string(session_file()?).map_err(|e| e.to_string())?;
+    let v = post(&endpoint("token"), &[
+        ("grant_type", "refresh_token"), ("client_id", &client_id()),
+        ("refresh_token", refresh.trim()), ("scope", SCOPE),
+    ])?;
+    let Token::Ok { access, refresh } = parse_token(&v)? else { return Err("Sign in again to restore live updates.".into()); };
+    {
+        let _guard = SESSION_UPDATE.lock().unwrap_or_else(|e| e.into_inner());
+        if !live() { return Err("cancelled".into()); }
+        save(&refresh)?;
+    }
+    session(&access)
 }
 
 /// CSA uses a different audience from chat; request it only when Teams is opened.
