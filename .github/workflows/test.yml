@@ -34,6 +34,8 @@ jobs:
           python-version: '3.11'
       - name: Rust tests
         run: cargo test --locked
+      - name: Release build
+        run: cargo build --release --locked
       - name: Check without optional features
         run: cargo check --locked --no-default-features
       - name: Packaging tests
