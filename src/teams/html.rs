@@ -1,0 +1,277 @@
+//! Message HTML: what Teams sends and what we send back.
+
+use super::*;
+
+/// The quote block Teams puts before a reply's text, which [`reply_content`] reads back.
+pub(super) fn reply_html(m: &Msg) -> String {
+    let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let mri = if m.sender_id.starts_with("28:") { m.sender_id.clone() } else { format!("8:orgid:{}", m.sender_id) };
+    let ms = chrono::DateTime::parse_from_rfc3339(&m.time).map(|t| t.timestamp_millis().to_string()).unwrap_or_default();
+    // Teams quotes a preview, not the whole message.
+    let preview: String = m.text.chars().take(200).collect();
+    format!(
+        r#"<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="{}"><strong itemprop="mri" itemid="{}">{}</strong><span itemprop="time" itemid="{ms}"></span><p itemprop="preview">{}</p></blockquote>"#,
+        escape(&m.server_id), escape(&mri), escape(&m.sender), escape(&preview).replace('\n', " "),
+    )
+}
+
+/// `raw`'s quoted reply, then `text`, then `raw`'s pictures and the new `images`.
+pub(super) fn edited_html(raw: &str, text: &str, images: &[(String, (u32, u32))]) -> String {
+    let quote = raw.find("<blockquote").and_then(|start| {
+        let open_end = start + raw[start..].find('>')?;
+        let end = open_end + raw[open_end..].find("</blockquote>")? + "</blockquote>".len();
+        raw[start..open_end].contains("schema.skype.com/Reply").then(|| &raw[start..end])
+    }).unwrap_or("");
+    let pictures: String = raw.split("<img").skip(1).filter_map(|tag| tag.split_once('>').map(|(attrs, _)| attrs))
+        .filter(|attrs| attrs.contains("schema.skype.com/AMSImage"))
+        .map(|attrs| format!("<div><img{attrs}></div>"))
+        .collect();
+    let new = message_html(text, images);
+    // Pictures go after the text and before the new ones, as `message_html` places pictures.
+    let at = new.find("<div><img").unwrap_or(new.len());
+    format!("{quote}{}{pictures}{}", &new[..at], &new[at..])
+}
+
+/// Plain text as the HTML a Teams message carries; what [`html_to_text`] undoes.
+/// A message's HTML: the text, then each picture as Teams sends a pasted one.
+pub(super) fn message_html(text: &str, images: &[(String, (u32, u32))]) -> String {
+    images.iter().fold(text_to_html(text), |mut html, (url, (w, h))| {
+        html.push_str(&format!(r#"<div><img src="{url}" itemscope="" itemtype="http://schema.skype.com/AMSImage" style="width:{w}px; height:{h}px"></div>"#));
+        html
+    })
+}
+
+/// Each fenced code block goes as a Teams code block, as Teams sends one, so it shows as code there too.
+pub fn text_to_html(text: &str) -> String {
+    let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\n', "<br>");
+    #[cfg(feature = "markdown")]
+    let blocks = crate::markdown::code_blocks(text);
+    #[cfg(not(feature = "markdown"))]
+    let blocks: Vec<(Range<usize>, String, String)> = vec![];
+    let mut html = String::new();
+    let mut at = 0;
+    for (r, lang, code) in blocks {
+        html.push_str(&escape(&text[at..r.start]));
+        let lang: String = lang.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '#')).collect();
+        let class = if lang.is_empty() { String::new() } else { format!(r#" class="language-{lang}""#) };
+        html.push_str(&format!("<pre{class}><code>{}</code></pre>", escape(code.trim_end_matches('\n'))));
+        at = r.end;
+    }
+    html.push_str(&escape(&text[at..]));
+    html
+}
+
+/// Split Teams' embedded reply preview from the new message; malformed HTML stays visible.
+pub(super) fn reply_content(raw: &str) -> (Option<Reply>, (String, Vec<(Range<usize>, String)>)) {
+    let parse = || {
+        let start = raw.find("<blockquote")?;
+        let open_end = start + raw[start..].find('>')?;
+        if !raw[start..open_end].contains("schema.skype.com/Reply") { return None; }
+        let end = open_end + raw[open_end..].find("</blockquote>")?;
+        let id = raw[start..open_end].split_once("itemid=").and_then(|(_, tail)| {
+            let quote = tail.chars().next()?;
+            matches!(quote, '\'' | '"').then(|| tail[1..].split(quote).next().unwrap_or("").to_owned())
+        }).unwrap_or_default();
+        let quoted = &raw[open_end + 1..end];
+        // shortcut: nested reply previews stay plain text; extend parsing if Teams sends them.
+        if quoted.contains("<blockquote") { return None; }
+        let element = |tag: &str| -> Option<(&str, &str)> {
+            let start = quoted.find(&format!("<{tag}"))?;
+            let open_end = start + quoted[start..].find('>')?;
+            let end = open_end + quoted[open_end..].find(&format!("</{tag}>"))?;
+            Some((&quoted[start..open_end], &quoted[open_end + 1..end]))
+        };
+        let sender = element("strong").map(|(_, body)| html_to_text(body)).unwrap_or_default();
+        let time = element("span").and_then(|(tag, _)| {
+            let tail = tag.split_once("itemid=")?.1;
+            let quote = tail.chars().next()?;
+            if !matches!(quote, '\'' | '"') { return None; }
+            tail[1..].split(quote).next()?.parse::<i64>().ok().filter(|ms| *ms >= 0).map(iso)
+        }).unwrap_or_default();
+        let text = html_to_text(&quoted[quoted.find("<p")?..]);
+        let mut body = raw[..start].to_owned();
+        body.push_str(&raw[end + "</blockquote>".len()..]);
+        Some((Some(Reply { id, sender, time, text }), html_to_rich(&body)))
+    };
+    parse().unwrap_or_else(|| (None, html_to_rich(raw)))
+}
+
+/// Teams message HTML as plain text: tags dropped, block ends as newlines, common entities decoded.
+pub fn html_to_text(html: &str) -> String {
+    rich(html, false).0
+}
+
+/// [`html_to_text`] plus its `http(s)` links (byte ranges of the text and where they point), with
+/// code blocks fenced as typed (```lang), so Markdown reads them as code blocks again.
+// shortcut: no formatting or mentions; extend here when the message view gets them.
+pub fn html_to_rich(html: &str) -> (String, Vec<(Range<usize>, String)>) {
+    rich(html, true)
+}
+
+pub(super) fn rich(html: &str, fences: bool) -> (String, Vec<(Range<usize>, String)>) {
+    let decode = |s: &str| s.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
+    let mut out = String::new();
+    let mut links = Vec::new();
+    let mut open: Option<(usize, String)> = None;
+    // The open code block: where its code starts in `out`, and its language.
+    let mut pre: Option<(usize, String)> = None;
+    let mut rest = html;
+    while let Some(i) = rest.find('<') {
+        // Newlines between tags are source formatting, not content; keeping them doubles every line break.
+        if !(rest[..i].trim().is_empty() && rest[..i].contains('\n')) {
+            out.push_str(&decode(&rest[..i]));
+        }
+        let Some(j) = rest[i..].find('>') else { break };
+        let inner = &rest[i + 1..i + j];
+        let tag = inner.trim_start_matches('/').split([' ', '/']).next().unwrap_or("").to_ascii_lowercase();
+        // In a code block every <br> is a line, so blank lines between sections stay.
+        if matches!(tag.as_str(), "br" | "p" | "div" | "li" | "tr" | "pre") && (!out.ends_with('\n') || pre.is_some() && tag == "br") {
+            out.push('\n');
+        }
+        if tag == "pre" && !inner.starts_with('/') {
+            let lang = inner.split_once("language-").and_then(|(_, l)| l.split(['"', '\'', ' ']).next()).unwrap_or("");
+            pre = Some((out.len(), lang.to_owned()));
+        } else if tag == "pre" && let Some((start, lang)) = pre.take().filter(|_| fences) {
+            // One backtick more than the longest run inside, so a fence in the code can't close it.
+            let run = out[start..].split(|c| c != '`').map(str::len).max().unwrap_or(0);
+            let fence = "`".repeat(run.max(2) + 1);
+            let open = format!("{fence}{lang}\n");
+            out.insert_str(start, &open);
+            links.iter_mut().filter(|(r, _): &&mut (Range<usize>, String)| r.start >= start).for_each(|(r, _)| *r = r.start + open.len()..r.end + open.len());
+            if !out.ends_with('\n') { out.push('\n'); }
+            out.push_str(&fence);
+            out.push('\n');
+        } else if tag == "pre" {
+            pre = None;
+        }
+        if tag == "a" {
+            if inner.starts_with('/') {
+                if let Some((start, href)) = open.take().filter(|(start, _)| out.len() > *start) {
+                    links.push((start..out.len(), href));
+                }
+            } else {
+                // Only web links: the URL goes to the system's opener on a click.
+                open = inner.split_once("href=\"").and_then(|(_, v)| v.split('"').next()).map(decode)
+                    .filter(|h| h.starts_with("https://") || h.starts_with("http://"))
+                    .map(|h| (out.len(), h));
+            }
+        }
+        rest = &rest[i + j + 1..];
+    }
+    if !rest.contains('<') {
+        out.push_str(&decode(rest));
+    }
+    let lead = out.len() - out.trim_start().len();
+    let text = out.trim().to_string();
+    let links = links.into_iter()
+        .map(|(r, h)| (r.start.saturating_sub(lead).min(text.len())..r.end.saturating_sub(lead).min(text.len()), h))
+        .filter(|(r, _)| !r.is_empty())
+        .collect();
+    (text, links)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn html_source_newlines_between_blocks_are_not_blank_lines() {
+        let raw = "<p>Date: 15th Nov</p>\r\n<p>Time: 4:00</p>\n<p>&nbsp;</p>\n<p>Reason: x</p>";
+        assert_eq!(super::html_to_text(raw), "Date: 15th Nov\nTime: 4:00\n \nReason: x");
+    }
+
+    #[test]
+    fn quoted_reply_keeps_preview_separate_from_body() {
+        let raw = r#"<div><blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1600457867820"><strong itemprop="mri">Bob &amp; Alice</strong><span itemprop="time" itemid="1600457867820"></span><p itemprop="preview">Original &lt;message&gt;</p><p>Second line</p></blockquote><p>My reply</p></div>"#;
+        let v = json!({"messages": [{"messagetype": "RichText/Html", "content": raw}]});
+        let msgs = parse_messages(&v, "me");
+        assert_eq!(msgs[0].text, "My reply");
+        let reply = msgs[0].reply.as_ref().unwrap();
+        assert_eq!(reply.id, "1600457867820");
+        assert_eq!(reply.sender, "Bob & Alice");
+        assert_eq!(reply.time, iso(1600457867820));
+        assert_eq!(reply.text, "Original <message>\nSecond line");
+        let only_quote = raw.replace("<p>My reply</p>", "");
+        assert_eq!(reply_content(&only_quote).1.0, "");
+        for plain in ["<p>Normal message</p>", "<blockquote>Ordinary quote</blockquote>", "<blockquote itemtype='http://schema.skype.com/Reply'>Broken"] {
+            assert_eq!(reply_content(plain), (None, html_to_rich(plain)));
+        }
+        let missing_time = raw.replace("itemid=\"1600457867820\"", "");
+        assert_eq!(reply_content(&missing_time).0.unwrap().time, "");
+        let ids = json!({"messages": [{"id": "server-id", "clientmessageid": "client-id", "messagetype": "Text", "content": "Sent"}]});
+        let msgs = parse_messages(&ids, "me");
+        assert_eq!(msgs[0].id, "client-id");
+        assert_eq!(msgs[0].server_id, "server-id");
+    }
+
+    #[test]
+    fn sent_pictures_parse_back_as_the_same_pictures() {
+        let url = "https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-sin-d2-ab12/views/imgo".to_owned();
+        let html = message_html("look <here>", &[(url.clone(), (1170, 2532))]);
+        let m = parse_messages(&json!({"messages": [{"messagetype": "RichText/Html", "content": html, "composetime": "1"}]}), "me");
+        assert_eq!(m[0].text, "look <here>");
+        assert_eq!(m[0].images, [url]);
+        assert_eq!(message_html("", &[]), "");
+    }
+
+    #[test]
+    fn replies_quote_as_teams_does_and_read_back() {
+        let m = super::Msg {
+            id: "c1".into(), server_id: "1700000000000".into(), sender: "Bob <B>".into(), sender_id: "oid-1".into(),
+            text: "first\nsecond".into(), time: "2026-11-14T10:24:00Z".into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(),
+        };
+        let html = format!("{}{}", super::reply_html(&m), super::message_html("ok", &[]));
+        assert!(html.contains(r#"itemid="8:orgid:oid-1""#));
+        let (reply, (text, _)) = super::reply_content(&html);
+        assert_eq!(reply, Some(super::Reply { id: "1700000000000".into(), sender: "Bob <B>".into(), time: "2026-11-14T10:24:00.000Z".into(), text: "first second".into() }));
+        assert_eq!(text, "ok");
+    }
+
+    #[test]
+    fn edits_keep_the_quote_and_pictures() {
+        let quote = r#"<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1"><strong>A</strong><p>hi</p></blockquote>"#;
+        let pic = r#"<img src="https://eu-api.asm.skype.com/v1/objects/0-a/views/imgo" itemtype="http://schema.skype.com/AMSImage" style="width:4px">"#;
+        let raw = format!("{quote}<p>old</p><div>{pic}</div><img src=\"https://x/emoji.png\">");
+        let new = ("https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo".to_string(), (2, 3));
+        let html = super::edited_html(&raw, "new <text>", &[new]);
+        assert_eq!(html, format!(r#"{quote}new &lt;text&gt;<div>{pic}</div><div><img src="https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo" itemscope="" itemtype="http://schema.skype.com/AMSImage" style="width:2px; height:3px"></div>"#));
+        assert_eq!(super::edited_html("<p>plain</p>", "x", &[]), "x");
+    }
+
+    #[test]
+    fn html() {
+        assert_eq!(html_to_text("<p>a<br>b</p><p>c &lt;d&gt;</p>"), "a\nb\nc <d>");
+        assert_eq!(html_to_text("<img src=\"x\">"), "");
+        assert_eq!(html_to_text("plain &amp;lt;"), "plain &lt;");
+        assert_eq!(html_to_text("<p>a<br><br>b</p><pre><code>c<br><br>d</code></pre>"), "a\nb\nc\n\nd");
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn code_blocks_go_as_teams_code_blocks_and_come_back_fenced() {
+        let typed = "hi <you>\n```markdown\n# H1\n\n## H2\n```\nbye";
+        let html = text_to_html(typed);
+        assert_eq!(html, r#"hi &lt;you&gt;<br><pre class="language-markdown"><code># H1<br><br>## H2</code></pre>bye"#);
+        assert_eq!(html_to_rich(&html).0, typed);
+        assert_eq!(html_to_text(&html), "hi <you>\n# H1\n\n## H2\nbye");
+        // A fence inside a block gets a longer fence around it, so it stays inside.
+        let nested = html_to_rich("<pre class=\"language-md x\"><code>a<br>```<br>b<br>```</code></pre>").0;
+        assert_eq!(nested, "````md\na\n```\nb\n```\n````");
+        let typed = "a <b> & c\nd &lt;";
+        assert_eq!(text_to_html(typed), "a &lt;b&gt; &amp; c<br>d &amp;lt;");
+        assert_eq!(html_to_text(&text_to_html(typed)), typed);
+        assert_eq!(encode("19:a_b@unq.gbl.spaces"), "19%3Aa_b%40unq.gbl.spaces");
+    }
+
+    #[test]
+    fn links_keep_their_text_range_and_only_web_urls() {
+        // A real Teams link: the href's entities decode, and the range covers the shown URL.
+        let raw = r#"<p>see <a href="https://x.example/?a=1&amp;b=2" itemtype="http://schema.skype.com/HyperLink" title="t">https://x.example/?a=1&amp;b=2</a> &amp; <a href="javascript:alert(1)">js</a></p>"#;
+        let (text, links) = super::html_to_rich(raw);
+        assert_eq!(text, "see https://x.example/?a=1&b=2 & js");
+        assert_eq!(links.len(), 1);
+        assert_eq!(&text[links[0].0.clone()], "https://x.example/?a=1&b=2");
+        assert_eq!(links[0].1, "https://x.example/?a=1&b=2");
+    }
+}

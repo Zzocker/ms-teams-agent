@@ -1,8 +1,17 @@
+
 //! Teams' private chat service (undocumented; the Teams web client's own API): chats and their messages.
 
 use crate::auth::{Session, User, agent};
 use serde_json::Value;
 use std::ops::Range;
+
+mod html;
+mod media;
+mod parse;
+
+pub use html::*;
+pub use media::*;
+pub use parse::*;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chat {
@@ -36,34 +45,6 @@ pub fn teams(s: &Session) -> Result<Vec<Team>, String> {
         .header("x-skypetoken", &s.skype_token)
         .call())?;
     parse_teams(&v)
-}
-
-fn parse_teams(v: &Value) -> Result<Vec<Team>, String> {
-    let teams = v["teams"].as_array().ok_or("Teams response has no team list")?;
-    teams.iter().map(|team| {
-        let id = ["id", "threadId"].into_iter()
-            .find_map(|key| team[key].as_str().filter(|id| !id.trim().is_empty()))
-            .ok_or_else(|| format!("Team has no ID (fields: {})", team.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default()))?;
-        let channels = team["channels"].as_array().ok_or("Team has no channel list")?;
-        Ok(Team {
-            id: id.into(),
-            title: team["displayName"].as_str().unwrap_or("Team").into(),
-            channels: channels.iter().map(|channel| {
-                let id = ["id", "threadId"].into_iter()
-                    .find_map(|key| channel[key].as_str().filter(|id| !id.trim().is_empty()))
-                    .ok_or("Channel has no ID")?;
-                Ok(Chat {
-                    id: id.into(),
-                    title: channel["displayName"].as_str().unwrap_or("Channel").into(),
-                    avatar_id: String::new(),
-                    avatar_members: Vec::new(),
-                    preview: String::new(),
-                    time: String::new(),
-                    unread: false,
-                })
-            }).collect::<Result<_, String>>()?,
-        })
-    }).collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -132,27 +113,6 @@ fn get(s: &Session, path: &str) -> Result<Value, String> {
     answer(agent().get(&url(s, path)).header("Authentication", &auth(s)).call())
 }
 
-/// The media store derives the client platform from this and rejects requests it can't parse.
-const MEDIA_USER_AGENT: &str = "Teams/24295.605.3225.8804/49";
-
-/// Stores a pasted PNG in the media store, readable by `chat_id`'s members, and returns its
-/// [`ams_preview`] URL for the message to show.
-pub fn upload_image(s: &Session, chat_id: &str, png: &[u8]) -> Result<String, String> {
-    let media = &s.media;
-    if media.is_empty() { return Err("no media store for this account".into()); }
-    let token = format!("skype_token {}", s.skype_token);
-    let body = serde_json::json!({"type": "pish/image", "permissions": {chat_id: ["read"]}});
-    let mut res = agent().post(&format!("{media}/v1/objects/")).header("Authorization", &token).header("User-Agent", MEDIA_USER_AGENT)
-        .send_json(&body).map_err(|e| e.to_string())?;
-    let status = res.status();
-    let v: Value = res.body_mut().read_json().map_err(|e| format!("media store {status}: {e}"))?;
-    let id = v["id"].as_str().filter(|_| status.is_success()).ok_or(format!("media store {status}"))?;
-    let res = agent().put(&format!("{media}/v1/objects/{}/content/imgpsh", encode(id))).header("Authorization", &token)
-        .header("User-Agent", MEDIA_USER_AGENT).header("Content-Type", "application/octet-stream").send(png).map_err(|e| e.to_string())?;
-    if !res.status().is_success() { return Err(format!("image upload {}", res.status())); }
-    ams_preview(&format!("{media}/v1/objects/{id}/views/imgo")).ok_or("unexpected media store address".into())
-}
-
 /// Sends `text` and pictures (from [`upload_image`], with their pixel sizes) to a chat as the signed-in user.
 /// `id` is from [`new_msg_id`].
 /// Posts a message; with `quote`, as a reply quoting it.
@@ -178,19 +138,6 @@ pub fn delete(s: &Session, chat_id: &str, server_id: &str) -> Result<(), String>
     }
 }
 
-/// The quote block Teams puts before a reply's text, which [`reply_content`] reads back.
-fn reply_html(m: &Msg) -> String {
-    let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
-    let mri = if m.sender_id.starts_with("28:") { m.sender_id.clone() } else { format!("8:orgid:{}", m.sender_id) };
-    let ms = chrono::DateTime::parse_from_rfc3339(&m.time).map(|t| t.timestamp_millis().to_string()).unwrap_or_default();
-    // Teams quotes a preview, not the whole message.
-    let preview: String = m.text.chars().take(200).collect();
-    format!(
-        r#"<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="{}"><strong itemprop="mri" itemid="{}">{}</strong><span itemprop="time" itemid="{ms}"></span><p itemprop="preview">{}</p></blockquote>"#,
-        escape(&m.server_id), escape(&mri), escape(&m.sender), escape(&preview).replace('\n', " "),
-    )
-}
-
 /// Replaces a sent message's text with `text`, keeping its quoted reply and pictures, and adding
 /// `images` (from [`upload_image`]) after them.
 pub fn edit(s: &Session, chat_id: &str, server_id: &str, raw: &str, text: &str, images: &[(String, (u32, u32))]) -> Result<(), String> {
@@ -202,23 +149,6 @@ pub fn edit(s: &Session, chat_id: &str, server_id: &str, raw: &str, text: &str, 
     });
     let url = url(s, &format!("conversations/{}/messages/{}", encode(chat_id), encode(server_id)));
     answer(agent().put(&url).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
-}
-
-/// `raw`'s quoted reply, then `text`, then `raw`'s pictures and the new `images`.
-fn edited_html(raw: &str, text: &str, images: &[(String, (u32, u32))]) -> String {
-    let quote = raw.find("<blockquote").and_then(|start| {
-        let open_end = start + raw[start..].find('>')?;
-        let end = open_end + raw[open_end..].find("</blockquote>")? + "</blockquote>".len();
-        raw[start..open_end].contains("schema.skype.com/Reply").then(|| &raw[start..end])
-    }).unwrap_or("");
-    let pictures: String = raw.split("<img").skip(1).filter_map(|tag| tag.split_once('>').map(|(attrs, _)| attrs))
-        .filter(|attrs| attrs.contains("schema.skype.com/AMSImage"))
-        .map(|attrs| format!("<div><img{attrs}></div>"))
-        .collect();
-    let new = message_html(text, images);
-    // Pictures go after the text and before the new ones, as `message_html` places pictures.
-    let at = new.find("<div><img").unwrap_or(new.len());
-    format!("{quote}{}{pictures}{}", &new[..at], &new[at..])
 }
 
 /// A fresh client message id. The service drops a repeat of one, so it must differ per message.
@@ -260,35 +190,6 @@ pub fn merge(old: Page, fresh: Page) -> Page {
     let older = if msgs.is_empty() { fresh.older } else { old.older };
     msgs.extend(fresh.msgs);
     Page { msgs, older }
-}
-
-/// Plain text as the HTML a Teams message carries; what [`html_to_text`] undoes.
-/// A message's HTML: the text, then each picture as Teams sends a pasted one.
-fn message_html(text: &str, images: &[(String, (u32, u32))]) -> String {
-    images.iter().fold(text_to_html(text), |mut html, (url, (w, h))| {
-        html.push_str(&format!(r#"<div><img src="{url}" itemscope="" itemtype="http://schema.skype.com/AMSImage" style="width:{w}px; height:{h}px"></div>"#));
-        html
-    })
-}
-
-/// Each fenced code block goes as a Teams code block, as Teams sends one, so it shows as code there too.
-pub fn text_to_html(text: &str) -> String {
-    let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\n', "<br>");
-    #[cfg(feature = "markdown")]
-    let blocks = crate::markdown::code_blocks(text);
-    #[cfg(not(feature = "markdown"))]
-    let blocks: Vec<(Range<usize>, String, String)> = vec![];
-    let mut html = String::new();
-    let mut at = 0;
-    for (r, lang, code) in blocks {
-        html.push_str(&escape(&text[at..r.start]));
-        let lang: String = lang.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '#')).collect();
-        let class = if lang.is_empty() { String::new() } else { format!(r#" class="language-{lang}""#) };
-        html.push_str(&format!("<pre{class}><code>{}</code></pre>", escape(code.trim_end_matches('\n'))));
-        at = r.end;
-    }
-    html.push_str(&escape(&text[at..]));
-    html
 }
 
 /// The chats with guessed titles; [`name_chats`] gives them their people's names.
@@ -355,20 +256,6 @@ fn members(s: &Session, chat_id: &str) -> Result<Vec<String>, String> {
     Ok(v["members"].as_array().unwrap_or(&empty).iter().filter_map(|m| m["id"].as_str().map(String::from)).collect())
 }
 
-/// Preserve bot MRIs: their GUIDs are not Entra user IDs.
-fn avatar_id(from: &str) -> String {
-    let mri = from.rsplit('/').next().unwrap_or("");
-    if let Some(id) = mri.strip_prefix("8:orgid:") { id.into() }
-    else if mri.starts_with("28:") { mri.into() }
-    else { String::new() }
-}
-
-/// The other person's object id in a 1:1 chat, whose id is `19:{oid}_{oid}@unq.gbl.spaces`.
-pub fn peer<'a>(chat_id: &'a str, me: &str) -> Option<&'a str> {
-    let (a, b) = chat_id.strip_prefix("19:")?.strip_suffix("@unq.gbl.spaces")?.split_once('_')?;
-    Some(if a == me { b } else { a })
-}
-
 /// A run of messages, oldest first, and the link to the page before it (`None` at the start of the chat).
 #[derive(Clone)]
 pub struct Page {
@@ -413,293 +300,6 @@ fn page(v: &Value, me: &str) -> Page {
     Page { msgs: parse_messages(v, me), older: v["_metadata"]["backwardLink"].as_str().map(Into::into) }
 }
 
-/// The chat with yourself, which Teams shows as "Name (You)".
-const NOTES: &str = "48:notes";
-/// A chat with no topic and nobody else's last message to name it after.
-const UNTITLED: &str = "Chat";
-
-pub fn parse_chats(v: &Value, me: &User) -> Vec<Chat> {
-    let empty = vec![];
-    let mut chats: Vec<Chat> = v["conversations"].as_array().unwrap_or(&empty).iter()
-        .filter(|c| {
-            let id = c["id"].as_str().unwrap_or("");
-            // Other 48: ids are system threads (notifications, call log, drafts); space/topic are team channels.
-            !id.is_empty() && (id == NOTES || !id.starts_with("48:")) && !matches!(c["threadProperties"]["threadType"].as_str(), Some("space" | "topic"))
-        })
-        .map(|c| {
-            let last = &c["lastMessage"];
-            let topic = c["threadProperties"]["topic"].as_str().unwrap_or("").trim();
-            let sender = last["imdisplayname"].as_str().unwrap_or("");
-            // shortcut: an untitled chat is named after its last sender who isn't me; the proper name needs a member lookup per chat.
-            let you = format!("{} (You)", me.name);
-            let title = if c["id"] == NOTES {
-                &you
-            } else if !topic.is_empty() {
-                topic
-            } else if !sender.is_empty() && !last["from"].as_str().unwrap_or("").ends_with(&me.id) {
-                sender
-            } else {
-                UNTITLED
-            };
-            Chat {
-                id: c["id"].as_str().unwrap_or("").into(),
-                title: title.into(),
-                avatar_members: Vec::new(),
-                avatar_id: {
-                    let sender = avatar_id(last["from"].as_str().unwrap_or(""));
-                    if sender.starts_with("28:") { sender } else { String::new() }
-                },
-                preview: {
-                    let content = html_to_text(last["content"].as_str().unwrap_or(""));
-                    let text = content.lines().next().unwrap_or("");
-                    let sender = if last["from"].as_str().is_some_and(|from| avatar_id(from) == me.id) {
-                        "You"
-                    } else if peer(c["id"].as_str().unwrap_or(""), &me.id).is_some() {
-                        ""
-                    } else {
-                        sender.trim()
-                    };
-                    if text.is_empty() || sender.is_empty() { text.into() } else { format!("{sender}: {text}") }
-                },
-                time: last["composetime"].as_str().unwrap_or("").into(),
-                unread: chat_unread(c, &me.id),
-            }
-        })
-        .collect();
-    chats.sort_by(|a, b| b.time.cmp(&a.time));
-    chats
-}
-
-fn chat_unread(chat: &Value, me: &str) -> bool {
-    let last = &chat["lastMessage"];
-    if last["from"].as_str().is_none_or(|from| from.rsplit(':').next() == Some(me)) {
-        return false;
-    }
-    let read = chat["properties"]["consumptionhorizon"].as_str()
-        .and_then(|h| h.split(';').next())
-        .and_then(|id| id.parse::<u64>().ok());
-    let latest = last["id"].as_str().and_then(|id| id.parse::<u64>().ok());
-    matches!((read, latest), (Some(read), Some(latest)) if latest > read)
-}
-
-/// Oldest first; only messages people wrote (not typing, joins, renames, calls).
-pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
-    let empty = vec![];
-    let mut msgs: Vec<Msg> = v["messages"].as_array().unwrap_or(&empty).iter()
-        .filter(|m| matches!(m["messagetype"].as_str(), Some(t) if t == "Text" || t.starts_with("RichText")))
-        .filter_map(|m| {
-            let raw = m["content"].as_str().unwrap_or("");
-            if raw.is_empty() {
-                return None; // deleted
-            }
-            let (reply, (text, links)) = reply_content(raw);
-            let images = images(m, raw);
-            let files = files(m);
-            Some(Msg {
-                id: m["clientmessageid"].as_str().or(m["id"].as_str()).unwrap_or("").into(),
-                server_id: m["id"].as_str().unwrap_or("").into(),
-                sender: m["imdisplayname"].as_str().unwrap_or("").into(),
-                sender_id: avatar_id(m["from"].as_str().unwrap_or("")),
-                text: if text.is_empty() && reply.is_none() && images.is_empty() && files.is_empty() { "[attachment]".into() } else { text },
-                time: m["composetime"].as_str().unwrap_or("").into(),
-                mine: !me.is_empty() && m["from"].as_str().unwrap_or("").ends_with(me),
-                reply,
-                images,
-                links,
-                files,
-                raw: raw.into(),
-            })
-        })
-        .collect();
-    msgs.sort_by(|a, b| a.time.cmp(&b.time));
-    msgs
-}
-
-/// Pictures pasted into the message body, then image files' previews, as [`ams_preview`] URLs.
-fn images(m: &Value, raw: &str) -> Vec<String> {
-    let inline = raw.split("<img").skip(1).filter_map(|tag| {
-        let tag = tag.split('>').next()?;
-        tag.contains("schema.skype.com/AMSImage").then(|| tag.split_once("src=\"")?.1.split('"').next()).flatten()
-    });
-    let files: Vec<Value> = m["properties"]["files"].as_str().and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default();
-    let previews = files.iter().filter_map(|f| f["filePreview"]["previewUrl"].as_str());
-    inline.chain(previews).filter_map(ams_preview).collect()
-}
-
-/// Shared files without a media-store picture, once each (Teams can repeat an entry dozens of times).
-fn files(m: &Value) -> Vec<File> {
-    let all: Vec<Value> = m["properties"]["files"].as_str().and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    all.iter()
-        .filter(|f| f["filePreview"]["previewUrl"].as_str().and_then(ams_preview).is_none())
-        .filter_map(|f| {
-            let info = &f["fileInfo"];
-            // Some file URLs carry raw spaces, which the system opener refuses.
-            let url = [&info["shareUrl"], &f["objectUrl"], &info["fileUrl"]].into_iter()
-                .find_map(|v| v.as_str().filter(|u| u.starts_with("https://")))?.replace(' ', "%20");
-            Some(File {
-                name: f["fileName"].as_str().or(f["title"].as_str())?.into(),
-                kind: f["fileType"].as_str().unwrap_or("").to_ascii_lowercase(),
-                preview: sharepoint_thumbnail(&url),
-                url,
-            })
-        })
-        .filter(|f| seen.insert(f.url.clone()))
-        .collect()
-}
-
-const THUMBNAIL: &str = "/driveItem/thumbnails/0/large/content";
-
-/// The SharePoint files API's thumbnail of a SharePoint file or sharing link, or `None` off SharePoint.
-pub fn sharepoint_thumbnail(url: &str) -> Option<String> {
-    let host = url.strip_prefix("https://")?.split(['/', '?']).next()?;
-    sharepoint(host).then(|| format!("https://{host}/_api/v2.1/shares/u!{}{THUMBNAIL}", b64url(url.as_bytes())))
-}
-
-/// The host a [`sharepoint_thumbnail`] URL asks, or `None` for any other URL: fetching it sends a
-/// SharePoint token, so only these may get one.
-#[cfg_attr(not(feature = "image"), allow(dead_code))]
-pub fn thumbnail_host(url: &str) -> Option<&str> {
-    let (host, path) = url.strip_prefix("https://")?.split_once('/')?;
-    let id = path.strip_prefix("_api/v2.1/shares/u!")?.strip_suffix(THUMBNAIL)?;
-    let id_ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    (sharepoint(host) && id_ok).then_some(host)
-}
-
-/// Microsoft's SharePoint Online; a token for another tenant's site isn't issued, so ours can't leak to it.
-fn sharepoint(host: &str) -> bool {
-    host.ends_with(".sharepoint.com") && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
-}
-
-/// Unpadded base64url, as the SharePoint shares API takes a URL.
-fn b64url(bytes: &[u8]) -> String {
-    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    bytes.chunks(3).flat_map(|c| {
-        let n = c.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
-        (0..=c.len()).map(move |i| ABC[(n >> (18 - 6 * i) & 63) as usize] as char)
-    }).collect()
-}
-
-/// The small preview view of a picture in Teams' media store, or `None` for any other URL:
-/// fetching it sends the Teams token, so only these hosts may get it.
-pub fn ams_preview(url: &str) -> Option<String> {
-    let (host, path) = url.strip_prefix("https://")?.split_once('/')?;
-    let id = path.strip_prefix("v1/objects/")?.split('/').next()?;
-    let host_ok = host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
-        && (host.ends_with(".asm.skype.com") || host.ends_with(".asyncgw.teams.microsoft.com"));
-    let id_ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-    (host_ok && id_ok).then(|| format!("https://{host}/v1/objects/{id}/views/imgo"))
-}
-
-/// Split Teams' embedded reply preview from the new message; malformed HTML stays visible.
-fn reply_content(raw: &str) -> (Option<Reply>, (String, Vec<(Range<usize>, String)>)) {
-    let parse = || {
-        let start = raw.find("<blockquote")?;
-        let open_end = start + raw[start..].find('>')?;
-        if !raw[start..open_end].contains("schema.skype.com/Reply") { return None; }
-        let end = open_end + raw[open_end..].find("</blockquote>")?;
-        let id = raw[start..open_end].split_once("itemid=").and_then(|(_, tail)| {
-            let quote = tail.chars().next()?;
-            matches!(quote, '\'' | '"').then(|| tail[1..].split(quote).next().unwrap_or("").to_owned())
-        }).unwrap_or_default();
-        let quoted = &raw[open_end + 1..end];
-        // shortcut: nested reply previews stay plain text; extend parsing if Teams sends them.
-        if quoted.contains("<blockquote") { return None; }
-        let element = |tag: &str| -> Option<(&str, &str)> {
-            let start = quoted.find(&format!("<{tag}"))?;
-            let open_end = start + quoted[start..].find('>')?;
-            let end = open_end + quoted[open_end..].find(&format!("</{tag}>"))?;
-            Some((&quoted[start..open_end], &quoted[open_end + 1..end]))
-        };
-        let sender = element("strong").map(|(_, body)| html_to_text(body)).unwrap_or_default();
-        let time = element("span").and_then(|(tag, _)| {
-            let tail = tag.split_once("itemid=")?.1;
-            let quote = tail.chars().next()?;
-            if !matches!(quote, '\'' | '"') { return None; }
-            tail[1..].split(quote).next()?.parse::<i64>().ok().filter(|ms| *ms >= 0).map(iso)
-        }).unwrap_or_default();
-        let text = html_to_text(&quoted[quoted.find("<p")?..]);
-        let mut body = raw[..start].to_owned();
-        body.push_str(&raw[end + "</blockquote>".len()..]);
-        Some((Some(Reply { id, sender, time, text }), html_to_rich(&body)))
-    };
-    parse().unwrap_or_else(|| (None, html_to_rich(raw)))
-}
-
-/// Teams message HTML as plain text: tags dropped, block ends as newlines, common entities decoded.
-pub fn html_to_text(html: &str) -> String {
-    rich(html, false).0
-}
-
-/// [`html_to_text`] plus its `http(s)` links (byte ranges of the text and where they point), with
-/// code blocks fenced as typed (```lang), so Markdown reads them as code blocks again.
-// shortcut: no formatting or mentions; extend here when the message view gets them.
-pub fn html_to_rich(html: &str) -> (String, Vec<(Range<usize>, String)>) {
-    rich(html, true)
-}
-
-fn rich(html: &str, fences: bool) -> (String, Vec<(Range<usize>, String)>) {
-    let decode = |s: &str| s.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
-    let mut out = String::new();
-    let mut links = Vec::new();
-    let mut open: Option<(usize, String)> = None;
-    // The open code block: where its code starts in `out`, and its language.
-    let mut pre: Option<(usize, String)> = None;
-    let mut rest = html;
-    while let Some(i) = rest.find('<') {
-        // Newlines between tags are source formatting, not content; keeping them doubles every line break.
-        if !(rest[..i].trim().is_empty() && rest[..i].contains('\n')) {
-            out.push_str(&decode(&rest[..i]));
-        }
-        let Some(j) = rest[i..].find('>') else { break };
-        let inner = &rest[i + 1..i + j];
-        let tag = inner.trim_start_matches('/').split([' ', '/']).next().unwrap_or("").to_ascii_lowercase();
-        // In a code block every <br> is a line, so blank lines between sections stay.
-        if matches!(tag.as_str(), "br" | "p" | "div" | "li" | "tr" | "pre") && (!out.ends_with('\n') || pre.is_some() && tag == "br") {
-            out.push('\n');
-        }
-        if tag == "pre" && !inner.starts_with('/') {
-            let lang = inner.split_once("language-").and_then(|(_, l)| l.split(['"', '\'', ' ']).next()).unwrap_or("");
-            pre = Some((out.len(), lang.to_owned()));
-        } else if tag == "pre" && let Some((start, lang)) = pre.take().filter(|_| fences) {
-            // One backtick more than the longest run inside, so a fence in the code can't close it.
-            let run = out[start..].split(|c| c != '`').map(str::len).max().unwrap_or(0);
-            let fence = "`".repeat(run.max(2) + 1);
-            let open = format!("{fence}{lang}\n");
-            out.insert_str(start, &open);
-            links.iter_mut().filter(|(r, _): &&mut (Range<usize>, String)| r.start >= start).for_each(|(r, _)| *r = r.start + open.len()..r.end + open.len());
-            if !out.ends_with('\n') { out.push('\n'); }
-            out.push_str(&fence);
-            out.push('\n');
-        } else if tag == "pre" {
-            pre = None;
-        }
-        if tag == "a" {
-            if inner.starts_with('/') {
-                if let Some((start, href)) = open.take().filter(|(start, _)| out.len() > *start) {
-                    links.push((start..out.len(), href));
-                }
-            } else {
-                // Only web links: the URL goes to the system's opener on a click.
-                open = inner.split_once("href=\"").and_then(|(_, v)| v.split('"').next()).map(decode)
-                    .filter(|h| h.starts_with("https://") || h.starts_with("http://"))
-                    .map(|h| (out.len(), h));
-            }
-        }
-        rest = &rest[i + j + 1..];
-    }
-    if !rest.contains('<') {
-        out.push_str(&decode(rest));
-    }
-    let lead = out.len() - out.trim_start().len();
-    let text = out.trim().to_string();
-    let links = links.into_iter()
-        .map(|(r, h)| (r.start.saturating_sub(lead).min(text.len())..r.end.saturating_sub(lead).min(text.len()), h))
-        .filter(|(r, _)| !r.is_empty())
-        .collect();
-    (text, links)
-}
-
 /// A path segment, percent-encoded as JavaScript's `encodeURIComponent` does.
 fn encode(s: &str) -> String {
     s.bytes().map(|b| match b {
@@ -710,20 +310,7 @@ fn encode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn bot_avatar_identity_is_preserved() {
-        let mri = "28:ca9e26b7-dce5-44a0-b2b7-a70a3d65ce25";
-        let from = format!("https://chat/v1/users/ME/contacts/{mri}");
-        let chats = super::parse_chats(&serde_json::json!({"conversations": [{
-            "id": "19:me_bot@unq.gbl.spaces",
-            "lastMessage": {"from": from, "imdisplayname": "GitHub Notifications"}
-        }]}), &crate::auth::User::default());
-        assert_eq!(chats[0].avatar_id, mri);
-        let messages = super::parse_messages(&serde_json::json!({"messages": [{
-            "from": from, "messagetype": "Text", "content": "Notification"
-        }]}), "me");
-        assert_eq!(messages[0].sender_id, mri);
-    }
+    use super::*;
 
     #[test]
     fn read_marker_keeps_server_and_client_message_ids_separate() {
@@ -741,202 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn unread_chats_compare_server_message_ids_with_read_horizon() {
-        let mut chat = serde_json::json!({
-            "properties": {"consumptionhorizon": "100;999;50"},
-            "lastMessage": {"id": "101", "from": "8:orgid:other"}
-        });
-        assert!(super::chat_unread(&chat, "me"));
-        chat["lastMessage"]["id"] = "100".into();
-        assert!(!super::chat_unread(&chat, "me"));
-        chat["lastMessage"]["id"] = "99".into();
-        assert!(!super::chat_unread(&chat, "me"));
-        chat["lastMessage"]["id"] = "101".into();
-        chat["lastMessage"]["from"] = "8:orgid:me".into();
-        assert!(!super::chat_unread(&chat, "me"));
-        chat["lastMessage"]["from"] = "8:orgid:other".into();
-        chat["properties"]["consumptionhorizon"] = "invalid".into();
-        assert!(!super::chat_unread(&chat, "me"));
-        chat["properties"] = serde_json::Value::Null;
-        assert!(!super::chat_unread(&chat, "me"));
-    }
-
-    use super::*;
-    use serde_json::json;
-
-    const ME: &str = "8:orgid:me-oid";
-
-    #[test]
-    fn teams_keep_channels_under_their_team() {
-        let v = json!({"teams": [
-            {"threadId": "development", "displayName": "Development", "channels": [
-                {"id": "backend", "displayName": "Backend"},
-                {"id": "general", "displayName": "General", "isFavorite": false}
-            ]},
-            {"threadId": "empty", "displayName": "Empty", "channels": []}
-        ]});
-        let teams = parse_teams(&v).unwrap();
-        assert_eq!(teams.len(), 2);
-        assert_eq!(teams[0].title, "Development");
-        assert_eq!(teams[0].channels.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["backend", "general"]);
-        assert!(teams[1].channels.is_empty());
-        assert!(parse_teams(&json!({"teams": []})).unwrap().is_empty());
-        assert!(parse_teams(&json!({"error": "denied"})).is_err());
-        assert!(parse_teams(&json!({"teams": [{"threadId": "x", "channels": [{"displayName": "Missing ID"}]}]})).is_err());
-    }
-
-    #[test]
-    fn teams_accept_id_and_thread_id_variants() {
-        for team_key in ["id", "threadId"] {
-            for channel_key in ["id", "threadId"] {
-                let mut team = json!({"displayName": "Development", "channels": [{"displayName": "Backend"}]});
-                team[team_key] = json!("team-id");
-                team["channels"][0][channel_key] = json!("channel-id");
-                let teams = parse_teams(&json!({"teams": [team]})).unwrap();
-                assert_eq!(teams[0].id, "team-id");
-                assert_eq!(teams[0].channels[0].id, "channel-id");
-            }
-        }
-        let teams = parse_teams(&json!({"teams": [{"id": "", "threadId": "fallback", "channels": []}]})).unwrap();
-        assert_eq!(teams[0].id, "fallback");
-        assert!(parse_teams(&json!({"teams": [{"id": " ", "channels": []}]})).is_err());
-    }
-
-    #[test]
-    fn chats_skip_system_threads_and_channels_and_name_untitled_chats() {
-        let v = json!({"conversations": [
-            {"id": "48:notifications", "lastMessage": {}},
-            {"id": "48:notes", "lastMessage": {"imdisplayname": "Me", "composetime": "2026-11-12T00:00:00Z"}},
-            {"id": "19:c@thread.tacv2", "threadProperties": {"threadType": "space"}, "lastMessage": {}},
-            {"id": "19:a_b@unq.gbl.spaces", "lastMessage": {"imdisplayname": "Bob", "from": "https://x/contacts/8:orgid:bob",
-                "content": "<p>hi &amp; bye</p><p>second</p>", "composetime": "2026-11-14T10:00:00Z"}},
-            {"id": "19:g@thread.v2", "threadProperties": {"topic": "Design"}, "lastMessage": {"composetime": "2026-11-14T11:00:00Z"}},
-            {"id": "19:m_b@unq.gbl.spaces", "lastMessage": {"imdisplayname": "Me", "from": "https://x/contacts/8:orgid:me-oid", "composetime": "2026-11-13T00:00:00Z"}},
-        ]});
-        let c = parse_chats(&v, &User { name: "Me".into(), id: "me-oid".into(), ..User::default() });
-        assert_eq!(c.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Design", "Bob", "Chat", "Me (You)"]);
-        assert_eq!(c[1].preview, "hi & bye");
-        assert_eq!(peer("19:bob_me-oid@unq.gbl.spaces", "me-oid"), Some("bob"));
-        assert_eq!(peer("19:me-oid_bob@unq.gbl.spaces", "me-oid"), Some("bob"));
-        assert_eq!(peer("19:g@thread.v2", "me-oid"), None);
-    }
-
-    #[test]
-    fn chat_previews_label_self_and_handle_missing_sender_or_content() {
-        let v = json!({"conversations": [
-            {"id": "self", "lastMessage": {"from": "https://x/contacts/8:orgid:me", "imdisplayname": "My Name", "content": "Hello"}},
-            {"id": "unknown", "lastMessage": {"content": "Hello"}},
-            {"id": "empty", "lastMessage": {"imdisplayname": "Bob"}},
-            {"id": "19:me_bob@unq.gbl.spaces", "lastMessage": {"from": "8:orgid:me", "imdisplayname": "My Name", "content": "Hello"}},
-            {"id": "19:group@thread.v2", "lastMessage": {"from": "8:orgid:bob", "imdisplayname": "Bob", "content": "Hello"}}
-        ]});
-        let chats = parse_chats(&v, &User { id: "me".into(), ..User::default() });
-        assert_eq!(chats.iter().map(|c| c.preview.as_str()).collect::<Vec<_>>(), ["You: Hello", "Hello", "", "You: Hello", "Bob: Hello"]);
-    }
-
-    #[test]
-    fn html_source_newlines_between_blocks_are_not_blank_lines() {
-        let raw = "<p>Date: 15th Nov</p>\r\n<p>Time: 4:00</p>\n<p>&nbsp;</p>\n<p>Reason: x</p>";
-        assert_eq!(super::html_to_text(raw), "Date: 15th Nov\nTime: 4:00\n \nReason: x");
-    }
-
-    #[test]
-    fn quoted_reply_keeps_preview_separate_from_body() {
-        let raw = r#"<div><blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1600457867820"><strong itemprop="mri">Bob &amp; Alice</strong><span itemprop="time" itemid="1600457867820"></span><p itemprop="preview">Original &lt;message&gt;</p><p>Second line</p></blockquote><p>My reply</p></div>"#;
-        let v = json!({"messages": [{"messagetype": "RichText/Html", "content": raw}]});
-        let msgs = parse_messages(&v, "me");
-        assert_eq!(msgs[0].text, "My reply");
-        let reply = msgs[0].reply.as_ref().unwrap();
-        assert_eq!(reply.id, "1600457867820");
-        assert_eq!(reply.sender, "Bob & Alice");
-        assert_eq!(reply.time, iso(1600457867820));
-        assert_eq!(reply.text, "Original <message>\nSecond line");
-        let only_quote = raw.replace("<p>My reply</p>", "");
-        assert_eq!(reply_content(&only_quote).1.0, "");
-        for plain in ["<p>Normal message</p>", "<blockquote>Ordinary quote</blockquote>", "<blockquote itemtype='http://schema.skype.com/Reply'>Broken"] {
-            assert_eq!(reply_content(plain), (None, html_to_rich(plain)));
-        }
-        let missing_time = raw.replace("itemid=\"1600457867820\"", "");
-        assert_eq!(reply_content(&missing_time).0.unwrap().time, "");
-        let ids = json!({"messages": [{"id": "server-id", "clientmessageid": "client-id", "messagetype": "Text", "content": "Sent"}]});
-        let msgs = parse_messages(&ids, "me");
-        assert_eq!(msgs[0].id, "client-id");
-        assert_eq!(msgs[0].server_id, "server-id");
-    }
-
-    #[test]
-    fn messages_keep_only_text_oldest_first() {
-        let v = json!({"messages": [
-            {"messagetype": "RichText/Html", "content": "<div>two</div>", "imdisplayname": "Me", "from": format!("https://x/contacts/{ME}"), "composetime": "2"},
-            {"messagetype": "Control/Typing", "content": "", "composetime": "3"},
-            {"messagetype": "ThreadActivity/AddMember", "content": "<addmember/>", "composetime": "1"},
-            {"messagetype": "Text", "content": "", "composetime": "4"},
-            {"messagetype": "Text", "content": "one", "imdisplayname": "Bob", "from": "https://x/contacts/8:orgid:bob", "composetime": "1"},
-        ]});
-        let m = parse_messages(&v, "me-oid");
-        assert_eq!(m[0].sender_id, "bob");
-        assert_eq!(m[1].sender_id, "me-oid");
-        assert_eq!(m.iter().map(|m| (m.text.as_str(), m.mine)).collect::<Vec<_>>(), [("one", false), ("two", true)]);
-    }
-
-    #[test]
-    fn images_come_from_inline_pictures_and_file_previews_on_teams_hosts_only() {
-        let files = json!([
-            {"fileName": "a.png", "filePreview": {"previewUrl": "https://in-api.asm.skype.com/v1/objects/0-cin-d3-41c6/views/imgo"}},
-            {"fileName": "b.mov", "filePreview": {"previewUrl": ""}},
-            {"fileName": "c.gif", "filePreview": {"previewUrl": "https://evil.example/v1/objects/0-x/views/imgo"}},
-        ]).to_string();
-        let v = json!({"messages": [
-            {"messagetype": "RichText/Html", "composetime": "1", "content": r#"<div><img src="https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-sin-d2-650d/views/imgo" itemscope="" itemtype="http://schema.skype.com/AMSImage" style="width:1170px"><img src="https://x/emoji.png" itemtype="http://schema.skype.com/Emoji"></div>"#},
-            {"messagetype": "RichText/Html", "composetime": "2", "content": "<p>Github actions is down</p>", "properties": {"files": files}},
-        ]});
-        let m = parse_messages(&v, "me");
-        assert_eq!(m[0].text, "");
-        assert_eq!(m[0].images, ["https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-sin-d2-650d/views/imgo"]);
-        assert_eq!(m[1].text, "Github actions is down");
-        assert_eq!(m[1].images, ["https://in-api.asm.skype.com/v1/objects/0-cin-d3-41c6/views/imgo"]);
-        assert_eq!(ams_preview("https://in-api.asm.skype.com/v1/objects/0-a/views/imgpsh_mobile_save_anim").as_deref(), Some("https://in-api.asm.skype.com/v1/objects/0-a/views/imgo"));
-        for bad in ["http://in-api.asm.skype.com/v1/objects/0-a/views/imgo", "https://a@evil.com/x.asm.skype.com/v1/objects/0-a",
-            "https://evil.com?.asm.skype.com/v1/objects/0-a", "https://in-api.asm.skype.com/v1/objects/../x", "https://in-api.asm.skype.com/v2/objects/0-a"] {
-            assert_eq!(ams_preview(bad), None, "{bad}");
-        }
-    }
-
-    #[test]
-    fn sent_pictures_parse_back_as_the_same_pictures() {
-        let url = "https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-sin-d2-ab12/views/imgo".to_owned();
-        let html = message_html("look <here>", &[(url.clone(), (1170, 2532))]);
-        let m = parse_messages(&json!({"messages": [{"messagetype": "RichText/Html", "content": html, "composetime": "1"}]}), "me");
-        assert_eq!(m[0].text, "look <here>");
-        assert_eq!(m[0].images, [url]);
-        assert_eq!(message_html("", &[]), "");
-    }
-
-    #[test]
-    fn replies_quote_as_teams_does_and_read_back() {
-        let m = super::Msg {
-            id: "c1".into(), server_id: "1700000000000".into(), sender: "Bob <B>".into(), sender_id: "oid-1".into(),
-            text: "first\nsecond".into(), time: "2026-11-14T10:24:00Z".into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(),
-        };
-        let html = format!("{}{}", super::reply_html(&m), super::message_html("ok", &[]));
-        assert!(html.contains(r#"itemid="8:orgid:oid-1""#));
-        let (reply, (text, _)) = super::reply_content(&html);
-        assert_eq!(reply, Some(super::Reply { id: "1700000000000".into(), sender: "Bob <B>".into(), time: "2026-11-14T10:24:00.000Z".into(), text: "first second".into() }));
-        assert_eq!(text, "ok");
-    }
-
-    #[test]
-    fn edits_keep_the_quote_and_pictures() {
-        let quote = r#"<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1"><strong>A</strong><p>hi</p></blockquote>"#;
-        let pic = r#"<img src="https://eu-api.asm.skype.com/v1/objects/0-a/views/imgo" itemtype="http://schema.skype.com/AMSImage" style="width:4px">"#;
-        let raw = format!("{quote}<p>old</p><div>{pic}</div><img src=\"https://x/emoji.png\">");
-        let new = ("https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo".to_string(), (2, 3));
-        let html = super::edited_html(&raw, "new <text>", &[new]);
-        assert_eq!(html, format!(r#"{quote}new &lt;text&gt;<div>{pic}</div><div><img src="https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo" itemscope="" itemtype="http://schema.skype.com/AMSImage" style="width:2px; height:3px"></div>"#));
-        assert_eq!(super::edited_html("<p>plain</p>", "x", &[]), "x");
-    }
-
-    #[test]
     fn iso_dates() {
         assert_eq!(iso(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso(1_794_673_185_538), "2026-11-14T16:19:45.538Z");
@@ -951,74 +342,5 @@ mod tests {
         let p = merge(old, fresh);
         assert_eq!(p.msgs.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "sent"]);
         assert_eq!(p.older.as_deref(), Some("before-a"));
-    }
-
-    #[test]
-    fn html() {
-        assert_eq!(html_to_text("<p>a<br>b</p><p>c &lt;d&gt;</p>"), "a\nb\nc <d>");
-        assert_eq!(html_to_text("<img src=\"x\">"), "");
-        assert_eq!(html_to_text("plain &amp;lt;"), "plain &lt;");
-        assert_eq!(html_to_text("<p>a<br><br>b</p><pre><code>c<br><br>d</code></pre>"), "a\nb\nc\n\nd");
-    }
-
-    #[cfg(feature = "markdown")]
-    #[test]
-    fn code_blocks_go_as_teams_code_blocks_and_come_back_fenced() {
-        let typed = "hi <you>\n```markdown\n# H1\n\n## H2\n```\nbye";
-        let html = text_to_html(typed);
-        assert_eq!(html, r#"hi &lt;you&gt;<br><pre class="language-markdown"><code># H1<br><br>## H2</code></pre>bye"#);
-        assert_eq!(html_to_rich(&html).0, typed);
-        assert_eq!(html_to_text(&html), "hi <you>\n# H1\n\n## H2\nbye");
-        // A fence inside a block gets a longer fence around it, so it stays inside.
-        let nested = html_to_rich("<pre class=\"language-md x\"><code>a<br>```<br>b<br>```</code></pre>").0;
-        assert_eq!(nested, "````md\na\n```\nb\n```\n````");
-        let typed = "a <b> & c\nd &lt;";
-        assert_eq!(text_to_html(typed), "a &lt;b&gt; &amp; c<br>d &amp;lt;");
-        assert_eq!(html_to_text(&text_to_html(typed)), typed);
-        assert_eq!(encode("19:a_b@unq.gbl.spaces"), "19%3Aa_b%40unq.gbl.spaces");
-    }
-
-    #[test]
-    fn links_keep_their_text_range_and_only_web_urls() {
-        // A real Teams link: the href's entities decode, and the range covers the shown URL.
-        let raw = r#"<p>see <a href="https://x.example/?a=1&amp;b=2" itemtype="http://schema.skype.com/HyperLink" title="t">https://x.example/?a=1&amp;b=2</a> &amp; <a href="javascript:alert(1)">js</a></p>"#;
-        let (text, links) = super::html_to_rich(raw);
-        assert_eq!(text, "see https://x.example/?a=1&b=2 & js");
-        assert_eq!(links.len(), 1);
-        assert_eq!(&text[links[0].0.clone()], "https://x.example/?a=1&b=2");
-        assert_eq!(links[0].1, "https://x.example/?a=1&b=2");
-    }
-
-    #[test]
-    fn files_are_cards_once_each_with_previews_on_sharepoint_only() {
-        let loop_ = json!({"fileName": "Notes.loop", "fileType": "loop", "filePreview": {"previewUrl": ""},
-            "fileInfo": {"shareUrl": "https://contoso.sharepoint.com/:fl:/g/x?e=1"}, "objectUrl": "https://contoso.sharepoint.com/x.loop"});
-        let doc = json!({"fileName": "SLA.docx", "fileType": "DOCX", "fileInfo": {"fileUrl": "https://contoso-my.sharepoint.com/p/My SLA.docx"}});
-        let files = json!([
-            loop_, doc, doc,
-            {"fileName": "a.png", "fileInfo": {"shareUrl": "https://contoso.sharepoint.com/a"}, "filePreview": {"previewUrl": "https://in-api.asm.skype.com/v1/objects/0-a/views/imgo"}},
-            {"fileName": "elsewhere.pdf", "fileType": "pdf", "objectUrl": "https://evil.example/f.pdf"},
-            {"fileName": "nowhere.pdf", "objectUrl": "javascript:alert(1)"},
-        ]).to_string();
-        let v = json!({"messages": [{"messagetype": "RichText/Html", "composetime": "1", "content": "<p></p>", "properties": {"files": files}}]});
-        let m = &parse_messages(&v, "me")[0];
-        assert_eq!(m.text, "", "files aren't an [attachment]");
-        let got: Vec<_> = m.files.iter().map(|f| (f.name.as_str(), f.kind.as_str(), f.url.as_str(), f.preview.is_some())).collect();
-        assert_eq!(got, [
-            ("Notes.loop", "loop", "https://contoso.sharepoint.com/:fl:/g/x?e=1", true),
-            ("SLA.docx", "docx", "https://contoso-my.sharepoint.com/p/My%20SLA.docx", true),
-            ("elsewhere.pdf", "pdf", "https://evil.example/f.pdf", false),
-        ]);
-        let preview = m.files[0].preview.as_deref().unwrap();
-        assert_eq!(preview, "https://contoso.sharepoint.com/_api/v2.1/shares/u!aHR0cHM6Ly9jb250b3NvLnNoYXJlcG9pbnQuY29tLzpmbDovZy94P2U9MQ/driveItem/thumbnails/0/large/content");
-        assert_eq!(thumbnail_host(preview), Some("contoso.sharepoint.com"));
-        for bad in ["https://evil.example/_api/v2.1/shares/u!aHR0/driveItem/thumbnails/0/large/content",
-            "https://a@evil.com/x.sharepoint.com/_api/v2.1/shares/u!aHR0/driveItem/thumbnails/0/large/content",
-            "https://contoso.sharepoint.com/_api/v2.1/shares/u!../../x/driveItem/thumbnails/0/large/content",
-            "https://contoso.sharepoint.com/_api/v2.1/me/drive"] {
-            assert_eq!(thumbnail_host(bad), None, "{bad}");
-        }
-        assert_eq!(b64url(b"https://a"), "aHR0cHM6Ly9h");
-        assert_eq!(b64url(b"ab"), "YWI");
     }
 }
