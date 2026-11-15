@@ -10,7 +10,7 @@ mod teams;
 
 use auth::Session;
 use rune::tok::{self, type_};
-use rune::{Align, AppSpec, Cx, El, GrowthSpec, Side, Drag, Latest, Live, Phase, ScrollPos, ScrollSpec, TextEdit, Tx, Waker, auto_grow, col, el, row, text, text_input};
+use rune::{Align, AppSpec, Cx, El, GrowthSpec, Side, Drag, Latest, Live, Phase, ScrollPos, ScrollSpec, Spring, TextEdit, Tx, Waker, WheelEvent, auto_grow, col, el, row, text, text_input};
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -512,6 +512,22 @@ fn with_bar(key: &'static str, list: El, bar: &Bar) -> El {
     let list = list.key(key).on_scroll_offset(move |at: ScrollPos| {
         b.at.set(at);
         b.rect.snap(thumb(at));
+    })
+    .on_wheel({
+        let (at, aim) = (bar.at.clone(), Cell::new(0.0_f32));
+        // A notched wheel jumps 120pt a click on Linux: glide half that instead. Trackpads stay 1:1.
+        move |_: &mut State, e: WheelEvent, tx: &mut Tx| {
+            if e.precise || e.dx != 0.0 {
+                return false;
+            }
+            let now = at.get();
+            let (y, max) = (now.offset[1], now.max[1]);
+            // Mid-glide, add to where it's headed so quick clicks add up; a target far off is stale.
+            let from = if (aim.get() - y).abs() < now.viewport[1] { aim.get() } else { y };
+            aim.set((from - e.dy * 0.5).clamp(0.0, max));
+            tx.scroll_to_with(key, 0.0, aim.get(), Spring::new(0.2, 0.0));
+            true
+        }
     });
     let at = bar.at.clone();
     // The track, not the thumb, takes the drag: wider to hit, and a press off the thumb jumps there.
@@ -1725,6 +1741,23 @@ mod tests {
         assert_eq!(offset_at(at, -50.0), 0.0, "dragged past the top");
         at.max[1] = 1e6; // long content: thumb keeps its minimum
         assert_eq!(thumb(at)[3], 24.0);
+    }
+
+    #[test]
+    fn a_notched_wheel_glides_half_a_click() {
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let rows = (0..100).map(|i| el().key(format!("r{i}")).h(40.0));
+            col().h(400.0).child(with_bar("list", col().children(rows).scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0), &s.msg_bar))
+        }
+        let mut rt = rune::Runtime::new(init(), view, (300.0, 400.0), rune::Env::new(true, 1.0));
+        rt.frame(1.0 / 120.0);
+        let y = |rt: &rune::Runtime<State>| rt.state.msg_bar.at.get().offset[1];
+        rt.wheel_event(WheelEvent::new(0.0, -120.0).at(100.0, 200.0));
+        rt.wheel_event(WheelEvent::new(0.0, -120.0).at(100.0, 200.0));
+        rt.frame(1.0 / 120.0);
+        assert!(y(&rt) > 0.0 && y(&rt) < 120.0, "glides, not jumps: {}", y(&rt));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        assert!((y(&rt) - 120.0).abs() < 0.5, "two clicks add up to 2 × 60: {}", y(&rt));
     }
 }
 
