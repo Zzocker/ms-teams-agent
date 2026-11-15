@@ -274,6 +274,8 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         // Only onto the page it was asked for: a reload meanwhile has its own cursor.
         if let (true, Some(Ok(page)), Ok(old)) = (s.selected.as_ref() == Some(&id), s.messages.as_mut(), r) {
             if page.older.as_deref() == Some(&link) {
+                // History must land before wheel input can release the anchor during growth.
+                tx.instant();
                 // The anchor lets go mid-scroll and at the very top, which is when pages land; pin the old first row.
                 if let Some(first) = page.msgs.first() {
                     tx.keep_on_screen(format!("msg/{}", first.id));

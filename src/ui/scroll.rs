@@ -99,6 +99,34 @@ mod tests {
     }
 
     #[test]
+    fn prepending_history_keeps_the_reading_position_through_the_next_wheel() {
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let start = if s.editor { 0 } else { 20 };
+            let rows = (start..60).map(|i| el().key(format!("r{i}")).h(40.0).arrives_whole());
+            col().h(400.0).child(with_bar("list", col().child(col().growth(GrowthSpec::default()).children(rows))
+                .scroll(ScrollSpec { stick_bottom: true }).scroll_anchor().grow(1.0).min_h(0.0), &s.msg_bar))
+        }
+        let mut rt = rune::Runtime::new(init(), view, (300.0, 400.0), rune::Env::new(true, 1.0));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        rt.update(|_, tx| tx.scroll_to_instant("list", 0.0, 240.0));
+        rt.frame(1.0 / 120.0);
+        let top = |rt: &rune::Runtime<State>| rt.elements().into_iter()
+            .find(|e| e.key.as_deref() == Some("r26")).unwrap().rect[1];
+        let before = top(&rt);
+        rt.update(|s, tx| {
+            tx.instant();
+            tx.keep_on_screen("r20");
+            s.editor = true;
+        });
+        rt.frame(1.0 / 120.0);
+        assert!((top(&rt) - before).abs() < 0.5, "history preserves the visible row");
+        rt.frame(1.0 / 120.0);
+        rt.wheel_event(WheelEvent::new(0.0, 120.0).at(100.0, 200.0));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        assert!((top(&rt) - before - 60.0).abs() < 0.5, "next wheel moves only half a notch: {}", top(&rt) - before);
+    }
+
+    #[test]
     fn a_notched_wheel_glides_half_a_click() {
         fn view(s: &State, _: &mut Cx<State>) -> El {
             let rows = (0..100).map(|i| el().key(format!("r{i}")).h(40.0));
