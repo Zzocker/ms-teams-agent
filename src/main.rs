@@ -214,7 +214,7 @@ fn setup(s: &mut State, waker: Waker) {
     s.release_loader.set_waker(waker.clone());
     s.waker = Some(waker);
     // The app has no arguments of its own; any argument is Rune's headless tooling, which gets no network.
-    if std::env::args().len() == 1 {
+    if !cfg!(test) && std::env::args().len() == 1 {
         notifications::start(s);
         sign_in(s, false);
     }
@@ -261,7 +261,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
-    if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
+    if !cfg!(test) && std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
         let mine = s.attempt.load(SeqCst);
         if s.live_attempt != Some(mine) {
             s.live_attempt = Some(mine);
@@ -381,7 +381,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     }
     changed |= notifications::poll(s);
     history::poll(s);
-    if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
+    if !cfg!(test) && std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
         let ids = std::iter::once(session.user.id.clone())
             .chain(chats.iter().map(|c| chat_avatar_id(c, &session.user.id).to_owned()))
             .chain(chats.iter().flat_map(|c| c.avatar_members.iter().take(3).map(|m| m.id.clone())))
