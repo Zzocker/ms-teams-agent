@@ -53,6 +53,7 @@ pub(crate) fn sign_out(s: &mut State) {
     s.loading_updates.clear();
     s.teams_loader.cancel();
     s.teams = None;
+    s.pending_channels.clear();
     s.show_teams = false;
     s.collapsed_teams.clear();
     s.loader.cancel();
@@ -98,8 +99,8 @@ pub(crate) fn open_chat(s: &mut State, id: String) {
     s.reply_highlight = None;
     s.reply_target = None;
     s.reply_error = None;
-    let Screen::Main { session, chats } = &s.screen else { return };
-    let unread = s.window_focused && s.window_visible && chats.iter().any(|chat| chat.id == id && chat.unread);
+    let Screen::Main { session, .. } = &s.screen else { return };
+    let unread = s.window_focused && s.window_visible && notifications::conversation(s, &id).is_some_and(|c| c.unread);
     let session = session.clone();
     if s.selected.as_ref() != Some(&id) {
         // A draft belongs to the chat it was written in; it must not follow to another one.

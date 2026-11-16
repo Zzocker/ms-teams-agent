@@ -18,6 +18,7 @@ pub(super) fn parse_teams(v: &Value) -> Result<Vec<Team>, String> {
                     .ok_or("Channel has no ID")?;
                 Ok(Chat {
                     id: id.into(),
+                    channel: true,
                     title: channel["displayName"].as_str().unwrap_or("Channel").into(),
                     avatar_id: String::new(),
                     avatar_members: Vec::new(),
@@ -50,12 +51,16 @@ pub(super) const NOTES: &str = "48:notes";
 pub(super) const UNTITLED: &str = "Chat";
 
 pub fn parse_chats(v: &Value, me: &User) -> Vec<Chat> {
+    parse_conversations(v, me).into_iter().filter(|c| !c.channel).collect()
+}
+
+pub(super) fn parse_conversations(v: &Value, me: &User) -> Vec<Chat> {
     let empty = vec![];
     let mut chats: Vec<Chat> = v["conversations"].as_array().unwrap_or(&empty).iter()
         .filter(|c| {
             let id = c["id"].as_str().unwrap_or("");
-            // Other 48: ids are system threads (notifications, call log, drafts); space/topic are team channels.
-            !id.is_empty() && (id == NOTES || !id.starts_with("48:")) && !matches!(c["threadProperties"]["threadType"].as_str(), Some("space" | "topic"))
+            // Other 48: ids are system threads (notifications, call log, drafts).
+            !id.is_empty() && (id == NOTES || !id.starts_with("48:"))
         })
         .map(|c| {
             let last = &c["lastMessage"];
@@ -74,6 +79,8 @@ pub fn parse_chats(v: &Value, me: &User) -> Vec<Chat> {
             };
             Chat {
                 id: c["id"].as_str().unwrap_or("").into(),
+                channel: c["id"].as_str().is_some_and(|id| id.ends_with("@thread.tacv2") || id.ends_with("@thread.skype"))
+                    || matches!(c["threadProperties"]["threadType"].as_str(), Some("space" | "topic")),
                 title: title.into(),
                 avatar_members: Vec::new(),
                 avatar_id: {
@@ -275,6 +282,20 @@ mod tests {
         assert_eq!(peer("19:bob_me-oid@unq.gbl.spaces", "me-oid"), Some("bob"));
         assert_eq!(peer("19:me-oid_bob@unq.gbl.spaces", "me-oid"), Some("bob"));
         assert_eq!(peer("19:g@thread.v2", "me-oid"), None);
+    }
+
+    #[test]
+    fn reconnect_conversations_keep_channels_but_chat_list_excludes_them() {
+        let value = json!({"conversations":[
+            {"id":"19:channel@thread.tacv2"},
+            {"id":"19:legacy@thread.skype"},
+            {"id":"opaque-channel", "threadProperties":{"threadType":"space"}},
+            {"id":"19:group@thread.v2"},
+            {"id":"19:me_other@unq.gbl.spaces"}
+        ]});
+        let all = parse_conversations(&value, &User::default());
+        assert_eq!(all.iter().map(|c| c.channel).collect::<Vec<_>>(), [true, true, true, false, false]);
+        assert_eq!(parse_chats(&value, &User::default()).len(), 2);
     }
 
     #[test]

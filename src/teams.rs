@@ -17,6 +17,7 @@ pub use parse::*;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chat {
     pub id: String,
+    pub channel: bool,
     pub title: String,
     pub avatar_id: String,
     pub avatar_members: Vec<User>,
@@ -207,6 +208,10 @@ pub fn merge(old: Page, fresh: Page) -> Page {
 /// The chats with guessed titles; [`name_chats`] gives them their people's names.
 pub fn chats(s: &Session) -> Result<Vec<Chat>, String> {
     Ok(parse_chats(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user))
+}
+
+fn conversations(s: &Session) -> Result<Vec<Chat>, String> {
+    Ok(parse_conversations(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user))
 }
 
 /// Resolves names and group avatar members after the initial chat list shows.

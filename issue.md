@@ -102,6 +102,8 @@ Order considers engineering effort first, then expected code change and uncertai
 
 ## 6. #9 — Channel messages create entries in Chat
 
+**Status:** Resolved — user confirmed the fix on 16 November 2026. Channel identity is preserved in initial lists, push events, and reconnect snapshots. Updates go to the existing channel or wait for Teams metadata, then merge without creating Chat rows. Channel notifications navigate to Teams and expand the owning team; channel read/quiet-state checks use the shared conversation lookup. Automated validation: 73 default-feature tests and 63 no-default-feature tests passed, with 2 ignored in each run. Checks cover metadata arriving late, collapsed teams, open-channel edits/replays, new group chats, reconnects, and notification routing. Individual manual checklist results were not supplied.
+
 **Reported:** New Teams/channel messages create a new chat.
 
 **Code evidence and required fix:** `message_update()` in `src/teams/events.rs` wraps conversation events as `Chat`; `receive()` in `src/notifications.rs` inserts unknown conversations into `Screen::Main.chats`. Teams/channels are held separately in `s.teams`. Route events by conversation type and update the existing channel state instead of inserting channel IDs into the direct/group chat list. Handle metadata not yet loaded and reconnect snapshots as well as live events; do not classify every unknown conversation as a channel.

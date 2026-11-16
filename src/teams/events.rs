@@ -133,7 +133,7 @@ fn connection(s: &Session, live: &impl Fn() -> bool, emit: &impl Fn(Update) -> R
                 register(&http, s, &endpoint, path)?;
                 registered = true;
                 // Recover missed messages once after connecting, rather than polling for them.
-                emit(Update::Connected(chats(s)?))?;
+                emit(Update::Connected(conversations(s)?))?;
                 emit(Update::Status(None))?;
             }
             "2" => socket.send(Message::Text(packet)).map_err(|_| "heartbeat write failed")?,
@@ -154,7 +154,7 @@ fn connection(s: &Session, live: &impl Fn() -> bool, emit: &impl Fn(Update) -> R
             "5" => {
                 if packet.contains("trouter.message_loss") {
                     register(&http, s, &endpoint, path)?;
-                    emit(Update::Connected(chats(s)?))?;
+                    emit(Update::Connected(conversations(s)?))?;
                 }
             }
             _ => {}
@@ -209,8 +209,9 @@ fn message_update(event: &Value, me: &User) -> Option<Update> {
     let id = link.split("/conversations/").nth(1)?.split('/').next()?;
     // The service supplies percent-encoded conversation links.
     let id = percent_decode(id)?;
-    let wrapper = serde_json::json!({"conversations":[{"id":id,"lastMessage":r}]});
-    let mut chat = parse_chats(&wrapper, me).pop()?;
+    let wrapper = serde_json::json!({"conversations":[{"id":id,"lastMessage":r,
+        "threadProperties": r.get("threadProperties").or_else(|| r.get("properties"))}]});
+    let mut chat = parse_conversations(&wrapper, me).pop()?;
     chat.unread = !r["from"].as_str().is_some_and(|from| from.ends_with(&me.id));
     let message = parse_messages(&serde_json::json!({"messages":[r]}), &me.id).pop();
     let server_id = r["id"].as_str()?.to_owned();
@@ -268,6 +269,23 @@ mod tests {
         event["resource"]["messagetype"] = "Control/Typing".into();
         assert!(message_update(&event, &User::default()).is_none());
         assert_eq!(percent_decode("bad%GG"), None);
+    }
+    #[test]
+    fn channel_pushes_keep_their_identity_without_team_metadata() {
+        for (id, properties, channel) in [
+            ("19:channel@thread.tacv2", serde_json::json!({}), true),
+            ("19:legacy@thread.skype", serde_json::json!({}), true),
+            ("opaque-channel", serde_json::json!({"threadType":"topic"}), true),
+            ("19:group@thread.v2", serde_json::json!({}), false),
+        ] {
+            let event = serde_json::json!({"resourceType":"NewMessage", "resource": {
+                "id":"1", "conversationLink":format!("https://service/conversations/{}", encode(id)),
+                "messagetype":"Text", "content":"hello", "properties":properties
+            }});
+            let Some(Update::Message { chat, .. }) = message_update(&event, &User::default()) else { panic!() };
+            assert_eq!(chat.id, id);
+            assert_eq!(chat.channel, channel);
+        }
     }
     #[test]
     fn decodes_plain_and_packed_payloads() {

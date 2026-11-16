@@ -50,12 +50,18 @@ fn notify(s: &State, chat: &Chat) {
 
 fn notification_current(s: &State, attempt: u64, id: &str) -> bool {
     s.attempt.load(SeqCst) == attempt
-        && matches!(&s.screen, Screen::Main { chats, .. } if chats.iter().any(|chat| chat.id == id))
+        && matches!(&s.screen, Screen::Main { .. }) && conversation(s, id).is_some()
 }
 
 fn open_notification(s: &mut State, attempt: u64, id: &str) {
     if !notification_current(s, attempt, id) { return; }
-    if s.show_teams { navigate(s, false); }
+    let channel = conversation(s, id).is_some_and(|c| c.channel);
+    if s.show_teams != channel { navigate(s, channel); }
+    if channel && let Some(Ok(teams)) = &s.teams {
+        for team in teams.iter().filter(|t| t.channels.iter().any(|c| c.id == id)) {
+            s.collapsed_teams.remove(&team.id);
+        }
+    }
     s.search.clear();
     s.viewer = None;
     s.editor = false;
@@ -64,7 +70,57 @@ fn open_notification(s: &mut State, attempt: u64, id: &str) {
 }
 
 pub fn chat_open(s: &State, id: &str) -> bool {
-    s.window_focused && s.window_visible && !s.show_teams && s.selected.as_deref() == Some(id)
+    s.window_focused && s.window_visible && s.selected.as_deref() == Some(id)
+        && s.show_teams == conversation(s, id).is_some_and(|c| c.channel)
+}
+
+pub(crate) fn conversation<'a>(s: &'a State, id: &str) -> Option<&'a Chat> {
+    let Screen::Main { chats, .. } = &s.screen else { return None };
+    s.teams.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flatten()
+        .flat_map(|t| &t.channels).chain(&s.pending_channels).chain(chats).find(|c| c.id == id)
+}
+
+pub(crate) fn conversation_mut<'a>(s: &'a mut State, id: &str) -> Option<&'a mut Chat> {
+    let Screen::Main { chats, .. } = &mut s.screen else { return None };
+    s.teams.as_mut().and_then(|r| r.as_mut().ok()).into_iter().flatten()
+        .flat_map(|t| &mut t.channels).chain(&mut s.pending_channels).chain(chats).find(|c| c.id == id)
+}
+
+fn conversation_rows<'a>(s: &'a mut State, chat: &Chat) -> Option<&'a mut Vec<Chat>> {
+    let Screen::Main { chats, .. } = &mut s.screen else { return None };
+    let team = s.teams.as_mut().and_then(|r| r.as_mut().ok()).into_iter().flatten()
+        .find(|t| t.channels.iter().any(|c| c.id == chat.id));
+    if let Some(team) = team {
+        chats.retain(|c| c.id != chat.id);
+        Some(&mut team.channels)
+    } else if chat.channel {
+        chats.retain(|c| c.id != chat.id);
+        Some(&mut s.pending_channels)
+    } else { Some(chats) }
+}
+
+pub(crate) fn set_teams(s: &mut State, result: Result<Vec<teams::Team>, String>) {
+    if let Ok(teams) = &result {
+        if let Screen::Main { chats, .. } = &mut s.screen {
+            chats.retain(|chat| {
+                if !teams.iter().flat_map(|t| &t.channels).any(|c| c.id == chat.id) { return true }
+                s.pending_channels.push(chat.clone());
+                false
+            });
+        }
+    }
+    s.teams = Some(result.map(|mut teams| {
+        s.pending_channels.retain(|pending| {
+            let Some(channel) = teams.iter_mut().flat_map(|t| &mut t.channels).find(|c| c.id == pending.id) else { return true };
+            if pending.time >= channel.time {
+                channel.preview = pending.preview.clone();
+                channel.time = pending.time.clone();
+                channel.unread = pending.unread;
+            }
+            false
+        });
+        teams
+    }));
 }
 
 pub fn poll(s: &mut State) -> bool {
@@ -81,8 +137,8 @@ pub fn poll(s: &mut State) -> bool {
     }
     if let Some((id, through, result)) = s.reader.take() {
         match result {
-            Ok(()) => if let Screen::Main { chats, .. } = &mut s.screen {
-                if let Some(chat) = chats.iter_mut().find(|c| c.id == id && c.time <= through) {
+            Ok(()) => {
+                if let Some(chat) = conversation_mut(s, &id).filter(|c| c.time <= through) {
                     chat.unread = false;
                 }
             },
@@ -95,11 +151,14 @@ pub fn poll(s: &mut State) -> bool {
 
 /// A reconnect snapshot keeps names/avatars and recovers the latest message missed offline.
 fn reconcile(s: &mut State, fresh: Vec<Chat>) {
-    let Screen::Main { chats, .. } = &mut s.screen else { return };
+    if !matches!(s.screen, Screen::Main { .. }) { return; }
+    let selected = s.selected.clone();
     let mut notices = Vec::new();
     let mut reload = false;
     for mut chat in fresh {
         s.live_baseline.insert(chat.id.clone(), chat.time.clone());
+        chat.channel |= conversation(s, &chat.id).is_some_and(|c| c.channel);
+        let Some(chats) = conversation_rows(s, &chat) else { continue };
         if let Some(index) = chats.iter().position(|old| old.id == chat.id) {
             let old = &chats[index];
             if chat.time < old.time { continue; }
@@ -108,14 +167,14 @@ fn reconcile(s: &mut State, fresh: Vec<Chat>) {
             chat.avatar_id = old.avatar_id.clone();
             chat.avatar_members = old.avatar_members.clone();
             if arrived && chat.unread { notices.push(chat.clone()); }
-            reload |= arrived && s.selected.as_ref() == Some(&chat.id);
+            reload |= arrived && selected.as_ref() == Some(&chat.id);
             chats[index] = chat;
         } else {
             if chat.unread { notices.push(chat.clone()); }
             chats.push(chat);
         }
     }
-    chats.sort_by(|a, b| b.time.cmp(&a.time));
+    if let Screen::Main { chats, .. } = &mut s.screen { chats.sort_by(|a, b| b.time.cmp(&a.time)); }
     for chat in notices {
         if !chat_open(s, &chat.id) { notify(s, &chat); }
     }
@@ -123,10 +182,10 @@ fn reconcile(s: &mut State, fresh: Vec<Chat>) {
 }
 
 fn receive(s: &mut State, mut chat: Chat, message: Option<Msg>, server_id: &str, new: bool) {
+    chat.channel |= conversation(s, &chat.id).is_some_and(|c| c.channel);
     let open = chat_open(s, &chat.id);
     let here = s.selected.as_ref() == Some(&chat.id);
-    let Screen::Main { chats, .. } = &mut s.screen else { return };
-    let prior = chats.iter().position(|c| c.id == chat.id);
+    if !matches!(s.screen, Screen::Main { .. }) { return; }
     // A replay or an edit can update a row, but cannot notify or move an old chat to the top.
     let key = (chat.id.clone(), server_id.to_owned());
     let arrived = new && !s.delivered.contains(&key)
@@ -136,6 +195,8 @@ fn receive(s: &mut State, mut chat: Chat, message: Option<Msg>, server_id: &str,
         s.delivered.push_back(key);
         if s.delivered.len() > 1024 { s.delivered.pop_front(); }
     }
+    let Some(chats) = conversation_rows(s, &chat) else { return };
+    let prior = chats.iter().position(|c| c.id == chat.id);
     if let Some(i) = prior {
         let old = &chats[i];
         chat.title = old.title.clone();
@@ -144,14 +205,14 @@ fn receive(s: &mut State, mut chat: Chat, message: Option<Msg>, server_id: &str,
         chat.unread = old.unread || (arrived && !open);
         if chat.time >= old.time {
             chats[i] = chat.clone();
-            if new { chats.sort_by(|a, b| b.time.cmp(&a.time)); }
+            if new && !chat.channel { chats.sort_by(|a, b| b.time.cmp(&a.time)); }
         } else if arrived && !open {
             chats[i].unread = true;
         }
     } else {
         chat.unread = arrived && !open;
         chats.push(chat.clone());
-        chats.sort_by(|a, b| b.time.cmp(&a.time));
+        if !chat.channel { chats.sort_by(|a, b| b.time.cmp(&a.time)); }
     }
     if here {
         if s.loader.is_pending() {
@@ -203,7 +264,7 @@ fn refresh_selected(s: &mut State) {
 pub fn focus(s: &mut State, focused: bool, _: &mut Tx) {
     s.window_focused = focused;
     if focused && let Some(id) = &s.selected {
-        let unread = matches!(&s.screen, Screen::Main { chats, .. } if chats.iter().any(|c| &c.id == id && c.unread));
+        let unread = conversation(s, id).is_some_and(|c| c.unread);
         if unread { mark_selected_read(s); }
     }
 }
@@ -258,6 +319,123 @@ mod tests {
         let chat = teams::parse_chats(&serde_json::json!({"conversations":[{"id":id,"lastMessage":resource}]}), &auth::User::default()).pop().unwrap();
         let msg = teams::parse_messages(&serde_json::json!({"messages":[resource]}), "me").pop().unwrap();
         (chat, msg)
+    }
+
+    fn channel(time: &str) -> (Chat, Msg) {
+        let (mut chat, message) = incoming("19:fixture@thread.v2", time);
+        chat.id = "19:channel@thread.tacv2".into();
+        chat.channel = true;
+        (chat, message)
+    }
+
+    fn team() -> teams::Team {
+        let (mut chat, _) = channel("");
+        chat.title = "General".into();
+        teams::Team { id: "team".into(), title: "Engineering".into(), channels: vec![chat] }
+    }
+
+    #[test]
+    fn channel_updates_wait_for_metadata_and_never_create_chat_rows() {
+        let mut s = signed_in();
+        let (send, notices) = mpsc::sync_channel(8);
+        s.notifications = Some(send);
+        let (chat, msg) = channel("1");
+        receive(&mut s, chat.clone(), Some(msg.clone()), "1", true);
+        receive(&mut s, chat.clone(), Some(msg), "1", true);
+        assert_eq!(s.pending_channels.len(), 1);
+        assert!(s.pending_channels[0].unread);
+        assert_eq!(notices.try_iter().count(), 1);
+        let Screen::Main { chats, .. } = &s.screen else { panic!() };
+        assert!(chats.is_empty());
+        s.collapsed_teams.insert("team".into());
+        set_teams(&mut s, Ok(vec![team()]));
+        assert!(s.pending_channels.is_empty());
+        let loaded = conversation(&s, &chat.id).unwrap();
+        assert_eq!(loaded.title, "General");
+        assert_eq!(loaded.time, "1");
+        assert!(loaded.unread);
+        let (mut newer, msg) = channel("2");
+        // Loaded membership must win even when an event lacks channel metadata.
+        newer.channel = false;
+        receive(&mut s, newer, Some(msg), "2", true);
+        assert_eq!(conversation(&s, &chat.id).unwrap().time, "2");
+        assert!(s.collapsed_teams.contains("team"));
+        let (direct, msg) = incoming("19:new@thread.v2", "3");
+        receive(&mut s, direct, Some(msg), "3", true);
+        let Screen::Main { chats, .. } = &s.screen else { panic!() };
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0].id, "19:new@thread.v2");
+    }
+
+    #[test]
+    fn channel_reconnect_and_open_channel_updates_stay_in_teams() {
+        let mut s = signed_in();
+        set_teams(&mut s, Ok(vec![team()]));
+        let (send, notices) = mpsc::sync_channel(8);
+        s.notifications = Some(send);
+        let (mut chat, msg) = channel("1");
+        chat.unread = true;
+        reconcile(&mut s, vec![chat.clone()]);
+        receive(&mut s, chat.clone(), Some(msg), "1", true);
+        assert_eq!(notices.try_iter().count(), 1);
+        assert_eq!(conversation(&s, &chat.id).unwrap().title, "General");
+        s.selected = Some(chat.id.clone());
+        s.show_teams = true;
+        s.window_focused = true;
+        s.window_visible = true;
+        s.messages = Some(Ok(Page { msgs: vec![], older: None }));
+        let (chat, msg) = channel("2");
+        for _ in 0..2 { receive(&mut s, chat.clone(), Some(msg.clone()), "2", true); }
+        assert!(notices.try_recv().is_err());
+        assert_eq!(s.messages.as_ref().unwrap().as_ref().unwrap().msgs.len(), 1);
+        let (chat, mut edit) = channel("3");
+        edit.server_id = "2".into();
+        receive(&mut s, chat, Some(edit), "2", false);
+        assert_eq!(s.messages.as_ref().unwrap().as_ref().unwrap().msgs.len(), 1);
+        assert!(notices.try_recv().is_err());
+        let Screen::Main { chats, .. } = &s.screen else { panic!() };
+        assert!(chats.is_empty());
+    }
+
+    #[test]
+    fn channel_notification_selects_teams_and_expands_its_team() {
+        let mut s = signed_in();
+        set_teams(&mut s, Ok(vec![team()]));
+        s.collapsed_teams.insert("team".into());
+        let id = s.teams.as_ref().unwrap().as_ref().unwrap()[0].channels[0].id.clone();
+        assert!(notification_current(&s, 0, &id));
+        open_notification(&mut s, 0, &id);
+        assert!(s.show_teams);
+        assert_eq!(s.selected.as_deref(), Some(id.as_str()));
+        assert!(!s.collapsed_teams.contains("team"));
+        let Screen::Main { chats, .. } = &s.screen else { panic!() };
+        assert!(chats.is_empty());
+    }
+
+    #[test]
+    fn channel_snapshot_before_metadata_and_legacy_rows_merge_into_teams() {
+        let mut s = signed_in();
+        let (mut chat, _) = channel("2");
+        chat.unread = true;
+        reconcile(&mut s, vec![chat.clone()]);
+        assert_eq!(s.pending_channels.len(), 1);
+        let (mut legacy, _) = incoming("opaque-channel", "1");
+        legacy.unread = true;
+        if let Screen::Main { chats, .. } = &mut s.screen { chats.push(legacy.clone()); }
+        let mut metadata = team();
+        legacy.channel = true;
+        legacy.title = "Legacy channel".into();
+        legacy.time.clear();
+        metadata.channels.push(legacy);
+        set_teams(&mut s, Ok(vec![metadata]));
+        assert!(s.pending_channels.is_empty());
+        assert_eq!(conversation(&s, &chat.id).unwrap().time, "2");
+        let legacy = conversation(&s, "opaque-channel").unwrap();
+        assert_eq!(legacy.title, "Legacy channel");
+        assert!(legacy.channel && legacy.unread);
+        assert_eq!(legacy.time, "1");
+        let Screen::Main { chats, .. } = &s.screen else { panic!() };
+        assert!(chats.is_empty());
     }
     #[test]
     fn incoming_chat_moves_first_and_notifies_once() {

@@ -62,6 +62,7 @@ struct State {
     reply_highlight_on: bool,
     show_teams: bool,
     teams: Option<Result<Vec<teams::Team>, String>>,
+    pending_channels: Vec<Chat>,
     teams_loader: Latest<Result<Vec<teams::Team>, String>>,
     collapsed_teams: std::collections::HashSet<String>,
     /// Bumped on every sign-in attempt, cancel and sign-out; a worker from an older one is ignored.
@@ -145,6 +146,7 @@ fn init() -> State {
         show_teams: false,
         teams: None,
         teams_loader: Latest::default(),
+        pending_channels: Vec::new(),
         collapsed_teams: Default::default(),
         attempt: Arc::default(),
         events: mpsc::channel(),
@@ -247,13 +249,13 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
     }
     if let Some(result) = s.teams_loader.take() {
-        s.teams = Some(result);
+        notifications::set_teams(s, result);
         changed = true;
     }
     if let Some((id, r, read)) = s.loader.take() {
         if s.selected.as_ref() == Some(&id) {
-            if r.is_ok() && read.is_ok() && notifications::chat_open(s, &id) && let Screen::Main { chats, .. } = &mut s.screen
-                && let Some(chat) = chats.iter_mut().find(|chat| chat.id == id) {
+            if r.is_ok() && read.is_ok() && notifications::chat_open(s, &id)
+                && let Some(chat) = notifications::conversation_mut(s, &id) {
                 // A message arriving after this request's read marker still needs acknowledging.
                 if r.as_ref().ok().and_then(|p| p.msgs.last()).is_some_and(|m| m.time >= chat.time) {
                     chat.unread = false;
