@@ -177,16 +177,16 @@ pub(crate) fn send(s: &mut State) {
     }
     let editing = s.editing.take();
     let replying = s.replying.take();
+    let links = teams::text_links(&text);
     if let (Some(Ok(page)), Some(e)) = (&mut s.messages, &editing) {
         if let Some(m) = page.msgs.iter_mut().find(|m| m.id == e.id) {
             m.text = text.clone();
-            // Its link ranges point into the old text.
-            m.links.clear();
+            m.links = links;
             m.images.extend(local.iter().cloned());
         }
     } else if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links: vec![], files: vec![], raw: String::new() });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files: vec![], raw: String::new() });
     }
     s.draft.clear();
     s.send_error = None;

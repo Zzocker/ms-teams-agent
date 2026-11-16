@@ -51,11 +51,61 @@ pub fn text_to_html(text: &str) -> String {
     let mut html = String::new();
     let mut at = 0;
     for (r, lang, code) in blocks {
-        html.push_str(&escape(&text[at..r.start]));
+        html.push_str(&linked_html(&text[at..r.start]));
         let lang: String = lang.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '#')).collect();
         let class = if lang.is_empty() { String::new() } else { format!(r#" class="language-{lang}""#) };
         html.push_str(&format!("<pre{class}><code>{}</code></pre>", escape(code.trim_end_matches('\n'))));
         at = r.end;
+    }
+    html.push_str(&linked_html(&text[at..]));
+    html
+}
+
+/// Web links in outgoing plain text, also used by its optimistic local message.
+pub fn text_links(text: &str) -> Vec<(Range<usize>, String)> {
+    #[cfg(feature = "markdown")]
+    let code: Vec<_> = pulldown_cmark::Parser::new(text).into_offset_iter().filter_map(|(event, range)| {
+        matches!(event, pulldown_cmark::Event::Code(_) | pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_))).then_some(range)
+    }).collect();
+    let mut links = Vec::new();
+    let mut at = 0;
+    for (start, _) in text.char_indices() {
+        if start < at { continue; }
+        let tail = &text[start..];
+        let prefix = if tail.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) { 8 }
+            else if tail.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("http://")) { 7 }
+            else { continue };
+        if text[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '/' | ':' | '@' | '.' | '-')) { continue; }
+        #[cfg(feature = "markdown")]
+        if code.iter().any(|range| range.contains(&start)) { continue; }
+        let end = tail.find(|c: char| c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | '"' | '\'' | '`')).unwrap_or(tail.len());
+        let mut url = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        loop {
+            let pair = match url.chars().next_back() {
+                Some(')') => ('(', ')'), Some(']') => ('[', ']'), Some('}') => ('{', '}'), _ => break,
+            };
+            if url.matches(pair.1).count() <= url.matches(pair.0).count() { break; }
+            url = url[..url.len() - 1].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        }
+        let host = url.get(prefix..).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("");
+        if host.is_empty() { continue; }
+        at = start + url.len();
+        links.push((start..at, url.to_owned()));
+    }
+    links
+}
+
+fn linked_html(text: &str) -> String {
+    let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\n', "<br>");
+    let mut html = String::new();
+    let mut at = 0;
+    for (range, url) in text_links(text) {
+        html.push_str(&escape(&text[at..range.start]));
+        let label = escape(&text[range.clone()]);
+        // Normalize the scheme so incoming link parsing accepts uppercase HTTP(S) too.
+        let (scheme, rest) = url.split_once("://").unwrap();
+        html.push_str(&format!("<a href=\"{}://{}\">{label}</a>", scheme.to_ascii_lowercase(), escape(rest)));
+        at = range.end;
     }
     html.push_str(&escape(&text[at..]));
     html
@@ -174,6 +224,42 @@ pub(super) fn rich(html: &str, fences: bool) -> (String, Vec<(Range<usize>, Stri
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn outgoing_links_round_trip_with_safe_html_and_correct_boundaries() {
+        let text = "你好 (https://example.com/a_(b)?x=1&y=2),\nhttp://example.org/test. <script>\"quoted\"</script> javascript:alert(1)";
+        let links = text_links(text);
+        assert_eq!(links.iter().map(|(_, url)| url.as_str()).collect::<Vec<_>>(),
+            ["https://example.com/a_(b)?x=1&y=2", "http://example.org/test"]);
+        for (range, url) in &links { assert_eq!(&text[range.clone()], url); }
+        let html = text_to_html(text);
+        assert!(html.contains("href=\"https://example.com/a_(b)?x=1&amp;y=2\""));
+        assert!(html.contains("&lt;script&gt;&quot;quoted&quot;&lt;/script&gt;"));
+        assert!(!html.contains("href=\"javascript:"));
+        assert_eq!(html_to_rich(&html), (text.to_owned(), links));
+        assert!(text_links("http:// https:// javascript:https://example.com").is_empty());
+        let (shown, links) = html_to_rich(&text_to_html("HTTPS://example.com/path"));
+        assert_eq!(shown, "HTTPS://example.com/path");
+        assert_eq!(links, vec![(0..shown.len(), "https://example.com/path".into())]);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn outgoing_links_skip_code_and_work_in_replies_and_edits() {
+        let text = "https://example.com/live\n`https://example.com/inline`\n```rs\nhttps://example.com/code\n```";
+        let html = message_html(text, &[]);
+        assert_eq!(text_links(text).len(), 1);
+        assert_eq!(html.matches("<a href=").count(), 1);
+        assert_eq!(html_to_rich(&html).1.len(), 1);
+        let raw = "<blockquote itemtype=\"http://schema.skype.com/Reply\"><strong>Someone</strong><p>quote</p></blockquote><p>old</p>";
+        let edited = edited_html(raw, text, &[]);
+        let (reply, (body, links)) = reply_content(&edited);
+        assert_eq!(reply.unwrap().text, "quote");
+        assert_eq!(body, text);
+        assert_eq!(links, text_links(text));
+        let reply = format!("{raw}{html}");
+        assert_eq!(reply_content(&reply).1.1.len(), 1);
+    }
 
     #[test]
     fn html_source_newlines_between_blocks_are_not_blank_lines() {

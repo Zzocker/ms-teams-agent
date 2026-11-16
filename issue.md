@@ -72,6 +72,8 @@ Order considers engineering effort first, then expected code change and uncertai
 
 ## 4. #6 — Sent URLs do not become hyperlinks
 
+**Status:** Resolved — user confirmed the fix on 16 November 2026. Shared HTTP(S) detection supplies outgoing HTML anchors and immediate local send/edit link ranges, including replies. HTML escaping, trailing punctuation, balanced parentheses, and Unicode offsets are covered by automated checks; Markdown code is excluded when Markdown support is enabled. Automated validation: 66 default-feature tests and 56 no-default-feature tests passed, with 2 ignored in each run. Individual manual checklist results were not supplied.
+
 **Reported:** A URL in a sent message is displayed as plain text.
 
 **Code evidence and required fix:** `text_to_html()` in `src/teams/html.rs` escapes plain text without adding anchors; incoming link ranges are obtained from HTML anchors by `html_to_rich()`. `src/ui/message.rs` already renders and opens those link ranges. Generate safe HTTP(S) anchors for outgoing URLs and ensure any local display path gets consistent link data. Apply to normal send, reply, and edit through the shared HTML conversion; preserve code blocks and escaping.
