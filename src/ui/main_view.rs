@@ -91,7 +91,17 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             .child(text_input(&s.search, type_::BODY).key("search").label("Search").color(t.text)
                 .placeholder("Search", t.text_secondary)
                 .caret(t.text, tok::accent(0, dark()).alpha(0.3))
-                .on_edit(|s: &mut State| &mut s.search)));
+                .on_edit(|s: &mut State| &mut s.search)
+                .on_key(|s: &mut State, e: &rune::KeyEvent, tx| {
+                    if e.key != rune::Key::Escape { return false }
+                    s.search.clear();
+                    tx.blur();
+                    true
+                })));
+    let search = col().key("search-area").w_full().child(search);
+    let search = if query.is_empty() { search } else {
+        search.modal_tx(true, |s: &mut State, tx| { s.search.clear(); tx.blur(); })
+    };
     let list = with_bar("chats", col().w_full().gap(2.0).padding(6.0).children(rows)
         .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0), &s.chat_bar);
     let sidebar = col().key("sidebar").w(s.panel_width).min_w(0.0).h_full().min_h(0.0)
@@ -283,9 +293,20 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                         .child(button("send", "Send", true, send)))))
         }
     };
-    col().w_full().h_full().fill(t.bg).child(search)
-        .child(row().w_full().grow(1.0).min_h(0.0).child(rail).child(sidebar).child(divider).child(pane))
+    let body = row().w_full().grow(1.0).min_h(0.0).child(rail).child(sidebar).child(divider).child(pane);
+    // Rune's modal scope includes later siblings, so keep the background outside search inert.
+    let body = if query.is_empty() { body } else { body.inert() };
+    col().w_full().h_full().fill(t.bg).child(search).child(body)
         .children(results)
+}
+
+pub(crate) fn search_key(s: &mut State, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    if !matches!(s.screen, Screen::Main { .. }) || s.editor || s.viewer.is_some() || s.menu.is_some() || s.release_panel {
+        return false;
+    }
+    if !rune::Keybind::new("ctrl+alt+e").matches_tx(e, tx) { return false }
+    tx.focus("search", false);
+    true
 }
 
 pub(crate) const PANEL_MAX: f32 = 480.0;
@@ -297,6 +318,50 @@ pub(crate) fn panel_width(start: f32, delta: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_shortcut_and_dismissal() {
+        let mut s = init();
+        demo(&mut s);
+        let mut rt = rune::Runtime::new(s, view, (1000.0, 680.0), rune::Env::new(true, 1.0));
+        rt.on_key = Some(search_key);
+        rt.frame(0.0);
+        rt.update(|_, tx| tx.focus("draft", false));
+        rt.frame(0.0);
+        let draft = rt.state.draft.text.clone();
+        rt.key(rune::KeyEvent { key: rune::Key::Command('e'), mods: rune::Mods { ctrl: true, cmd: true, alt: true, ..Default::default() } });
+        rt.frame(0.0);
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("search") && e.focused));
+        assert_eq!(rt.state.draft.text, draft);
+        for ch in "Charles".chars() {
+            rt.key(rune::KeyEvent { key: rune::Key::Text(ch.to_string()), mods: Default::default() });
+            rt.frame(0.0);
+        }
+        assert_eq!(rt.state.search.text, "Charles");
+        let hits: Vec<_> = rt.elements().into_iter().filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("hit/"))).collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].key.as_deref(), Some("hit/a"));
+        assert!(hits[0].rect[2] > 0.0 && hits[0].rect[3] > 0.0, "matching result must be visible: {:?}", hits[0].rect);
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let hit = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("hit/a")).unwrap();
+        let picked = rt.element_at(hit.rect[0] + hit.rect[2] / 2.0, hit.rect[1] + hit.rect[3] / 2.0).unwrap();
+        assert!(picked.path().starts_with(&hit.path), "results must be above the conversation pane: {}", picked.path());
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("results")));
+        rt.key(rune::KeyEvent { key: rune::Key::Escape, mods: Default::default() });
+        rt.frame(0.0);
+        assert!(rt.state.search.text.is_empty());
+        rt.update(|s, _| s.search.replace_text("no matches"));
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let input = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("search")).unwrap().rect;
+        rt.pointer_down(input[0] + 10.0, input[1] + 5.0);
+        rt.pointer_up(input[0] + 10.0, input[1] + 5.0);
+        rt.frame(0.0);
+        assert!(!rt.state.search.text.is_empty(), "clicking the search input must keep results open");
+        rt.pointer_down(900.0, 650.0);
+        rt.pointer_up(900.0, 650.0);
+        rt.frame(0.0);
+        assert!(rt.state.search.text.is_empty());
+    }
 
     #[test]
     fn panel_resize_limits_and_reopening() {

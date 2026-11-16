@@ -429,6 +429,7 @@ fn main() {
         scenes: SCENES,
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(search_key),
         min_size: Some((640.0, 400.0)),
         families: ("Inter", "ui-monospace"),
         ..AppSpec::new("Teams", (1000.0, 680.0), init, view)

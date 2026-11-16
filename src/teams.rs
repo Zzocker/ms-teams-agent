@@ -114,6 +114,13 @@ fn get(s: &Session, path: &str) -> Result<Value, String> {
     answer(agent().get(&url(s, path)).header("Authentication", &auth(s)).call())
 }
 
+fn edit_answer(res: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<(), String> {
+    let res = res.map_err(|e| e.to_string())?;
+    // Successful edits may have no body; only reads require JSON.
+    if res.status().is_success() { return Ok(()) }
+    answer(Ok(res)).map(|_| ())
+}
+
 /// Sends `text` and pictures (from [`upload_image`], with their pixel sizes) to a chat as the signed-in user.
 /// `id` is from [`new_msg_id`].
 /// Posts a message; with `quote`, as a reply quoting it.
@@ -149,7 +156,7 @@ pub fn edit(s: &Session, chat_id: &str, server_id: &str, raw: &str, text: &str, 
         "imdisplayname": s.user.name,
     });
     let url = url(s, &format!("conversations/{}/messages/{}", encode(chat_id), encode(server_id)));
-    answer(agent().put(&url).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
+    edit_answer(agent().put(&url).header("Authentication", &auth(s)).send_json(&body))
 }
 
 /// A fresh client message id. The service drops a repeat of one, so it must differ per message.
@@ -316,6 +323,20 @@ fn encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_responses_accept_success_without_requiring_json() {
+        let response = |status, body: &str| Ok(ureq::http::Response::builder()
+            .status(status).body(ureq::Body::builder().data(body)).unwrap());
+        for (status, body) in [(200, ""), (204, ""), (200, "{\"ok\":true}")] {
+            assert!(edit_answer(response(status, body)).is_ok());
+        }
+        assert!(edit_answer(response(401, "")).unwrap_err().contains("session expired"));
+        assert!(edit_answer(response(403, "{\"message\":\"Denied\"}")).unwrap_err().contains("Denied"));
+        assert!(edit_answer(response(500, "")).is_err());
+        assert!(edit_answer(Err(ureq::Error::StatusCode(503))).is_err());
+        assert!(answer(response(200, "")).is_err());
+    }
 
     #[test]
     fn read_marker_keeps_server_and_client_message_ids_separate() {
