@@ -136,6 +136,8 @@ Order considers engineering effort first, then expected code change and uncertai
 
 ## 8. #8 — Notification click does not open app; duplicate alert
 
+**Status:** Resolved — user confirmed the fix on 16 November 2026. On Linux, notification actions now retain the desktop's ActivationToken and pass it to Rune's activate method. Rune's tokenless Wayland open requests attention, explaining the GNOME readiness alert on that path. Notifications also identify their desktop entry. Automated validation: 76 default-feature tests and 66 no-default-feature tests passed, with 3 ignored in each run; the private D-Bus integration test was then run explicitly and passed. It verifies matching tokens, ignoring unrelated IDs, tokenless fallback, dismissal, and exactly one Notify call per message. Existing session/conversation validation remains in place. Individual manual checklist results were not supplied; other platforms remain unverified.
+
 **Reported:** Clicking a notification does not open the application. Two alerts appear: the actual event and “Teams is ready.” Both symptoms must be resolved.
 
 **Code evidence and required fix:** `src/notifications.rs` already registers a default action, waits for it, checks the session/chat, calls `open_chat()`, and calls `window.open()`. Reproduce native action delivery and window activation before changing this path. There is no obvious production “Teams is ready” alert in the inspected notification path; an ignored desktop notification test has different readiness text. Trace the second alert's actual source instead of assuming it is the same bug. Activation should restore/focus the existing app and navigate to the right conversation; channel routing must align with #9.

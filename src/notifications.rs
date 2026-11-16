@@ -2,6 +2,17 @@
 use crate::*;
 use teams::events::Update;
 
+#[cfg(all(unix, not(target_os = "macos")))]
+mod desktop;
+#[cfg(all(unix, not(target_os = "macos")))]
+use desktop::show_notification;
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn show_notification(notification: &notify_rust::Notification, on_default: impl FnOnce(Option<String>)) -> notify_rust::error::Result<()> {
+    notification.show()?.wait_for_action(|action| if action == "default" { on_default(None); });
+    Ok(())
+}
+
 pub fn start(s: &mut State) {
     let (send, receive) = mpsc::sync_channel::<(u64, String, String, String)>(64);
     let attempt = s.attempt.clone();
@@ -12,14 +23,13 @@ pub fn start(s: &mut State) {
             let window = window.clone();
             // Each visible notification waits independently, so later messages can still notify.
             std::thread::spawn(move || {
-                let notification = message_notification(&title, &body).show();
-                match notification {
-                    Ok(notification) => notification.wait_for_action(|action| {
-                        if action == "default" && let Some(window) = window {
-                            window.update(move |s, _| open_notification(s, mine, &chat));
-                        }
-                    }),
-                    Err(e) => eprintln!("Could not show Teams notification: {e}"),
+                let result = show_notification(&message_notification(&title, &body), |token| {
+                    if let Some(window) = window {
+                        window.update(move |s, _| open_notification(s, mine, &chat, token.as_deref()));
+                    }
+                });
+                if let Err(e) = result {
+                    eprintln!("Teams notification failed: {e}");
                 }
             });
         }
@@ -32,7 +42,7 @@ fn message_notification(title: &str, body: &str) -> notify_rust::Notification {
     notification.appname("Teams").icon("ms-teams-agent")
         .summary(title).body(&escape(body)).action("default", "Open chat");
     #[cfg(all(unix, not(target_os = "macos")))]
-    notification.sound_name("message-new-instant");
+    notification.sound_name("message-new-instant").hint(notify_rust::Hint::DesktopEntry("ms-teams-agent".into()));
     notification
 }
 
@@ -53,7 +63,7 @@ fn notification_current(s: &State, attempt: u64, id: &str) -> bool {
         && matches!(&s.screen, Screen::Main { .. }) && conversation(s, id).is_some()
 }
 
-fn open_notification(s: &mut State, attempt: u64, id: &str) {
+fn open_notification(s: &mut State, attempt: u64, id: &str, token: Option<&str>) {
     if !notification_current(s, attempt, id) { return; }
     let channel = conversation(s, id).is_some_and(|c| c.channel);
     if s.show_teams != channel { navigate(s, channel); }
@@ -66,7 +76,10 @@ fn open_notification(s: &mut State, attempt: u64, id: &str) {
     s.viewer = None;
     s.editor = false;
     open_chat(s, id.to_owned());
-    if let Some(window) = &s.window { window.open(); }
+    if let Some(window) = &s.window {
+        if let Some(token) = token.filter(|t| !t.is_empty()) { window.activate(token); }
+        else { window.open(); }
+    }
 }
 
 pub fn chat_open(s: &State, id: &str) -> bool {
@@ -330,6 +343,7 @@ mod tests {
     fn message_notification_requests_desktop_sound() {
         let notification = message_notification("New message", "<hello> & welcome");
         assert!(notification.hints.contains(&notify_rust::Hint::SoundName("message-new-instant".into())));
+        assert!(notification.hints.contains(&notify_rust::Hint::DesktopEntry("ms-teams-agent".into())));
         assert!(!notification.hints.contains(&notify_rust::Hint::SuppressSound(true)));
         assert_eq!(notification.body, "&lt;hello&gt; &amp; welcome");
         assert_eq!(notification.actions, ["default", "Open chat"]);
@@ -496,7 +510,7 @@ mod tests {
         s.collapsed_teams.insert("team".into());
         let id = s.teams.as_ref().unwrap().as_ref().unwrap()[0].channels[0].id.clone();
         assert!(notification_current(&s, 0, &id));
-        open_notification(&mut s, 0, &id);
+        open_notification(&mut s, 0, &id, Some("activation-token"));
         assert!(s.show_teams);
         assert_eq!(s.selected.as_deref(), Some(id.as_str()));
         assert!(!s.collapsed_teams.contains("team"));
