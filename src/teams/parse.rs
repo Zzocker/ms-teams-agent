@@ -132,7 +132,8 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
             if raw.is_empty() {
                 return None; // deleted
             }
-            let (reply, (text, links)) = reply_content(raw);
+            let (reply, (text, mut links)) = reply_content(raw);
+            let mentions = parsed_mentions(m, &mut links);
             let images = images(m, raw);
             let files = files(m);
             Some(Msg {
@@ -147,7 +148,7 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
                 images,
                 links,
                 files,
-                raw: raw.into(),
+                raw: raw.into(), mentions,
             })
         })
         .collect();

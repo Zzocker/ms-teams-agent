@@ -7,11 +7,13 @@ use std::ops::Range;
 
 mod html;
 mod media;
+mod mentions;
 mod parse;
 pub mod events;
 
 pub use html::*;
 pub use media::*;
+pub use mentions::*;
 pub use parse::*;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -84,6 +86,7 @@ pub struct Msg {
     pub files: Vec<File>,
     /// The HTML it came as, for an edit to keep what the text doesn't hold (quote, pictures).
     pub raw: String,
+    pub mentions: Vec<Mention>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -140,14 +143,15 @@ fn edit_answer(res: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Re
 /// Sends `text` and pictures (from [`upload_image`], with their pixel sizes) to a chat as the signed-in user.
 /// `id` is from [`new_msg_id`].
 /// Posts a message; with `quote`, as a reply quoting it.
-pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String, (u32, u32))], quote: Option<&Msg>) -> Result<(), String> {
-    let body = serde_json::json!({
-        "content": format!("{}{}", quote.map(reply_html).unwrap_or_default(), message_html(text, images)),
+pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String, (u32, u32))], quote: Option<&Msg>, mentions: &[Mention]) -> Result<(), String> {
+    let mut body = serde_json::json!({
+        "content": format!("{}{}", quote.map(reply_html).unwrap_or_default(), message_html(text, images, mentions)),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "clientmessageid": id,
         "imdisplayname": s.user.name,
     });
+    apply_mentions(&mut body, text, mentions)?;
     answer(agent().post(&url(s, &format!("conversations/{}/messages", encode(chat_id)))).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
 }
 
@@ -164,13 +168,14 @@ pub fn delete(s: &Session, chat_id: &str, server_id: &str) -> Result<(), String>
 
 /// Replaces a sent message's text with `text`, keeping its quoted reply and pictures, and adding
 /// `images` (from [`upload_image`]) after them.
-pub fn edit(s: &Session, chat_id: &str, server_id: &str, raw: &str, text: &str, images: &[(String, (u32, u32))]) -> Result<(), String> {
-    let body = serde_json::json!({
-        "content": edited_html(raw, text, images),
+pub fn edit(s: &Session, chat_id: &str, server_id: &str, raw: &str, text: &str, images: &[(String, (u32, u32))], mentions: &[Mention]) -> Result<(), String> {
+    let mut body = serde_json::json!({
+        "content": edited_html(raw, text, images, mentions),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "imdisplayname": s.user.name,
     });
+    apply_mentions(&mut body, text, mentions)?;
     let url = url(s, &format!("conversations/{}/messages/{}", encode(chat_id), encode(server_id)));
     edit_answer(agent().put(&url).header("Authentication", &auth(s)).send_json(&body))
 }
@@ -358,7 +363,7 @@ mod tests {
     fn read_marker_keeps_server_and_client_message_ids_separate() {
         let message = super::Msg {
             id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
-            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(),
+            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), mentions: vec![],
         };
         let marker = super::read_marker(&ReadHorizon::new(&message.server_id, &message.id).unwrap(), 999);
         assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
@@ -382,7 +387,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new() };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), mentions: vec![] };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);
@@ -393,7 +398,7 @@ mod tests {
     #[test]
     fn merge_keeps_push_messages_newer_than_a_fetch_in_flight() {
         let m = |id: &str| Msg { id:id.into(), server_id:id.into(), sender:String::new(), sender_id:String::new(),
-            text:id.into(), time:id.into(), mine:false, reply:None, images:vec![], links:vec![], files:vec![], raw:String::new() };
+            text:id.into(), time:id.into(), mine:false, reply:None, images:vec![], links:vec![], files:vec![], raw:String::new(), mentions:vec![] };
         let old = Page { msgs:vec![m("1"), m("3")], older:Some("older".into()) };
         let fetched = Page { msgs:vec![m("1"), m("2")], older:Some("older".into()) };
         assert_eq!(merge(old, fetched).msgs.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);

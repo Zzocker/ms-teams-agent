@@ -62,9 +62,11 @@ pub(crate) fn draft_editor(s: &State) -> Option<El> {
         .caret(t.text, tok::accent(0, dark()).alpha(0.3))
         .autofocus()
         .on_edit(|s: &mut State| &mut s.draft)
+        .on_input_change(mention_changed)
+        .on_input_key(mention_key)
         // Enter is a new line here; Send sends.
         .on_submit(|s: &mut State, _| s.draft.insert("\n")));
-    let write = col().key("editor-write").h_full().min_w(0.0).padding(16.0).child(auto_grow(input, 1, 10_000));
+    let write = col().key("editor-write").h_full().min_w(0.0).padding(16.0).children(mention_suggestions(s)).child(auto_grow(input, 1, 10_000));
     let body = row().w_full().grow(1.0).min_h(0.0).on_layout(|s: &mut State, [_, _, w, _]| s.editor_w = w);
     let body = if s.editor_preview {
         let divider = col().key("editor-resize").w(8.0).h_full().center().cursor(rune::Cursor::ResizeColumn)

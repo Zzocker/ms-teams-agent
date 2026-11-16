@@ -291,12 +291,15 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                         .child(col().grow(1.0).shrink().min_w(0.0).gap(8.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
                             .children((!s.pasted.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0)
                                 .children(s.pasted.iter().enumerate().map(|(i, (_, image))| pasted_image(image, i)))))
+                            .children((!s.editor).then(|| mention_suggestions(s)).flatten())
                             // One box shows the draft at a time; behind the editor it would echo every key.
                             .child(if s.editor { note("Writing in the editor…") } else {
                                 auto_grow(draft_paste(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
                                     .placeholder("Type a message", t.text_secondary)
                                     .caret(t.text, tok::accent(0, dark()).alpha(0.3))
                                     .on_edit(|s: &mut State| &mut s.draft)
+                                    .on_input_change(mention_changed)
+                                    .on_input_key(mention_key)
                                     .on_submit(|s: &mut State, _| if in_code_block(&s.draft.text[..s.draft.range().0]) { s.draft.insert("\n") } else { send(s) })), 1, 6)
                             }))
                         .child(button("editor", "Editor", false, |s| s.editor = true))

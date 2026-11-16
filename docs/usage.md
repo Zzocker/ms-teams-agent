@@ -20,3 +20,10 @@ Closing the window keeps Teams running in the background. Reopen it from the lau
 **Open Teams** action; use **Quit Teams** in the tray to stop it. On macOS use the Dock to reopen and
 the application menu to quit (Rune's tray support is Linux/Windows only). Linux needs a system tray
 host; GNOME may need an AppIndicator extension. Connection errors appear above the chat list.
+
+To mention a person, type `@` and part of their name or email in either message composer.
+Choose a conversation member with Up/Down and Enter or Tab, or click their name. The chip
+keeps that person's identity; Backspace removes it as a whole. Escape dismisses suggestions
+and leaves the text in place. Ordinary `@text` still sends without mentioning anyone.
+Suggestions show email or Teams ID to distinguish people with the same name. Member lookup
+must succeed for the conversation; team/channel-wide tags are not included.

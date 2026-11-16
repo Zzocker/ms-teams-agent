@@ -95,6 +95,7 @@ struct State {
     older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
     draft: TextEdit,
+    mentions: MentionPicker,
     /// The draft open in the pop-up editor; its preview on, the writing side's share of the
     /// editor's width, and that width as last laid out.
     editor: bool,
@@ -107,7 +108,7 @@ struct State {
     pasted: Vec<(rune::ClipboardImage, rune::Image)>,
     /// A send in flight: the chat, the message's id, then its reloaded messages and the pictures'
     /// URLs, or the error and the unsent text, pictures, and edited and quoted messages.
-    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, String, Vec<(rune::ClipboardImage, rune::Image)>, (Option<Msg>, Option<Msg>))>)>,
+    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, TextEdit, Vec<(rune::ClipboardImage, rune::Image)>, (Option<Msg>, Option<Msg>))>)>,
     /// The message the draft replies to when sent.
     replying: Option<Msg>,
     /// The message whose "…" menu is open, by id.
@@ -180,6 +181,7 @@ fn init() -> State {
         prefetch_id: None,
         older_loader: Latest::default(),
         draft: TextEdit::new(""),
+        mentions: Default::default(),
         editor: false,
         editor_preview: true,
         editor_split: 0.75,
@@ -205,6 +207,7 @@ fn setup(s: &mut State, waker: Waker) {
     s.loader.set_waker(waker.clone());
     s.prefetch.set_waker(waker.clone());
     s.sender.set_waker(waker.clone());
+    s.mentions.setup(waker.clone());
     s.older_loader.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
     s.reader.set_waker(waker.clone());
@@ -223,6 +226,7 @@ fn reply_blink(elapsed: f32) -> Option<bool> {
 
 fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let mut changed = releases::poll(s);
+    changed |= s.mentions.poll(&s.selected);
     if let Some((_, started)) = &s.reply_highlight {
         if let Some(on) = reply_blink(started.elapsed().as_secs_f32()) {
             changed |= s.reply_highlight_on != on;
@@ -366,7 +370,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                 }
                 // Give the text back, unless the user moved on to another chat or draft.
                 if here && s.draft.text.is_empty() {
-                    s.draft.replace_text(text);
+                    s.draft = text;
                 }
                 if here && s.pasted.is_empty() {
                     s.pasted = pasted;
