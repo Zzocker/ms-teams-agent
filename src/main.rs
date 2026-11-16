@@ -2,6 +2,7 @@
 //! A Teams desktop client: device-code sign-in that lasts across launches, then your chats.
 
 mod actions;
+mod history;
 mod auth;
 mod avatars;
 mod demo;
@@ -85,6 +86,11 @@ struct State {
     /// The selected chat's messages; `None` while they load.
     messages: Option<Messages>,
     loader: Latest<(String, Messages)>,
+    history: history::History,
+    restore_scroll: Option<ScrollPos>,
+    prefetch: Latest<(String, Messages)>,
+    prefetch_queue: std::collections::VecDeque<String>,
+    prefetch_id: Option<String>,
     /// A fetch of the page before the loaded ones: the chat, the link it followed, the page.
     older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
@@ -167,6 +173,11 @@ fn init() -> State {
         selected: None,
         messages: None,
         loader: Latest::default(),
+        history: Default::default(),
+        restore_scroll: None,
+        prefetch: Latest::default(),
+        prefetch_queue: Default::default(),
+        prefetch_id: None,
         older_loader: Latest::default(),
         draft: TextEdit::new(""),
         editor: false,
@@ -192,6 +203,7 @@ fn init() -> State {
 fn setup(s: &mut State, waker: Waker) {
     s.teams_loader.set_waker(waker.clone());
     s.loader.set_waker(waker.clone());
+    s.prefetch.set_waker(waker.clone());
     s.sender.set_waker(waker.clone());
     s.older_loader.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
@@ -238,6 +250,9 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                 }
             }
         } else {
+            if let Screen::Main { chats, .. } = &screen {
+                s.prefetch_queue = chats.iter().take(10).map(|c| c.id.clone()).collect();
+            }
             s.screen = screen;
         }
         changed = true;
@@ -256,12 +271,20 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     }
     if let Some((id, r)) = s.loader.take() {
         if s.selected.as_ref() == Some(&id) {
+            if let Ok(page) = &r { history::cache_page(s, id.clone(), page.clone()); }
             s.messages = Some(match (s.messages.take(), r) {
                 (Some(Ok(pushed)), Ok(loaded)) => Ok(teams::merge(pushed, loaded)),
+                (Some(Ok(cached)), Err(error)) => {
+                    s.live_status = Some(format!("Could not refresh messages: {error}"));
+                    Ok(cached)
+                }
                 (_, result) => result,
             });
             if let Some(Ok(page)) = &mut s.messages {
                 for (server_id, message) in s.loading_updates.drain(..) {
+                    if let Some(cached) = s.history.page_mut(&id) {
+                        notifications::apply_message(cached, &server_id, message.clone());
+                    }
                     notifications::apply_message(page, &server_id, message);
                 }
             } else { s.loading_updates.clear(); }
@@ -293,15 +316,18 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
     }
     if let Some((id, msg_id, r)) = s.deleter.take() {
+        history::invalidate(s, &id);
         match r {
             Ok(()) => if let (true, Some(Ok(page))) = (s.selected.as_ref() == Some(&id), &mut s.messages) {
                 page.msgs.retain(|m| m.id != msg_id);
+                s.loader.cancel();
             },
             Err(e) => s.send_error = Some(format!("Not deleted: {e}")),
         }
         changed = true;
     }
     if let Some((id, msg_id, r)) = s.sender.take() {
+        history::invalidate(s, &id);
         let here = s.selected.as_ref() == Some(&id);
         let r = r.map(|(fresh, urls)| {
             // The server's copy names the uploads; show them from the pasted pixels, not a download.
@@ -315,8 +341,10 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             let _ = urls;
             fresh
         });
+        if let Ok(Ok(page)) = &r { history::cache_page(s, id.clone(), page.clone()); }
         match r {
             Ok(Ok(fresh)) if here => {
+                s.loader.cancel();
                 s.messages = Some(Ok(match s.messages.take() {
                     Some(Ok(page)) => teams::merge(page, fresh),
                     _ => fresh,
@@ -348,6 +376,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         changed = true;
     }
     changed |= notifications::poll(s);
+    history::poll(s);
     if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
         let ids = std::iter::once(session.user.id.clone())
             .chain(chats.iter().map(|c| chat_avatar_id(c, &session.user.id).to_owned()))
@@ -445,6 +474,35 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_refresh_preserves_cached_data_on_failure_and_replays_inflight_changes() {
+        let mut s = init();
+        demo(&mut s);
+        let page = s.messages.as_ref().unwrap().as_ref().unwrap().clone();
+        let deleted = page.msgs[0].server_id.clone();
+        s.loading_updates.push((deleted.clone(), None));
+        s.loader.request((), move |_| ("a".into(), Ok(page)));
+        let mut tx = Tx::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while s.loader.is_pending() {
+            poll(&mut s, 0.0, &mut tx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        poll(&mut s, 0.0, &mut tx);
+        assert!(!s.history.get("a").unwrap().msgs.iter().any(|m| m.server_id == deleted));
+        let count = s.messages.as_ref().unwrap().as_ref().unwrap().msgs.len();
+        s.loader.request((), |_| ("a".into(), Err("offline".into())));
+        while s.loader.is_pending() {
+            poll(&mut s, 0.0, &mut tx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        poll(&mut s, 0.0, &mut tx);
+        assert_eq!(s.messages.as_ref().unwrap().as_ref().unwrap().msgs.len(), count);
+        assert!(s.live_status.as_deref().unwrap().contains("offline"));
+    }
 
     #[test]
     fn reply_highlight_blinks_three_times_then_stops() {

@@ -36,6 +36,13 @@ pub(crate) fn sign_in(s: &mut State, interactive: bool) {
 }
 
 pub(crate) fn sign_out(s: &mut State) {
+    s.history = Default::default();
+    s.restore_scroll = None;
+    s.prefetch.cancel();
+    s.prefetch_queue.clear();
+    s.prefetch_id = None;
+    s.older_loader.cancel();
+    s.deleter.cancel();
     s.avatars = Default::default();
     #[cfg(feature = "image")]
     { s.images = Default::default(); }
@@ -71,6 +78,8 @@ pub(crate) fn sign_out(s: &mut State) {
 }
 
 pub(crate) fn navigate(s: &mut State, teams: bool) {
+    history::remember_selected(s);
+    s.restore_scroll = None;
     #[cfg(feature = "image")]
     s.preview_rows.clear();
     s.reply_highlight = None;
@@ -95,6 +104,7 @@ pub(crate) fn navigate(s: &mut State, teams: bool) {
 }
 
 pub(crate) fn open_chat(s: &mut State, id: String) {
+    history::remember_selected(s);
     #[cfg(feature = "image")]
     s.preview_rows.clear();
     s.reply_highlight = None;
@@ -110,9 +120,15 @@ pub(crate) fn open_chat(s: &mut State, id: String) {
         (s.replying, s.menu, s.deleting) = (None, None, None);
         s.send_error = None;
     }
-    (s.selected, s.messages) = (Some(id.clone()), None);
+    s.older_loader.cancel();
+    history::stop_prefetch(s, &id);
+    s.prefetch_queue.retain(|queued| queued != &id);
+    s.messages = s.history.get(&id).map(Ok);
+    s.restore_scroll = if s.selected.as_ref() != Some(&id) { s.history.position(&id) } else { None };
+    s.selected = Some(id.clone());
     s.loading_updates.clear();
     notifications::mark_selected_read(s);
+    if s.waker.is_none() { return; } // Headless scenes do not fetch history.
     s.loader.request(id, move |id| {
         let r = teams::messages(&session, &id);
         (id, r)
@@ -165,6 +181,7 @@ pub(crate) fn send(s: &mut State) {
     }
     let session = session.clone();
     let id = id.clone();
+    history::invalidate(s, &id);
     let msg_id = teams::new_msg_id();
     let pasted = std::mem::take(&mut s.pasted);
     // The pasted pictures show at once under local keys, until their uploads have URLs.

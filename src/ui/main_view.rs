@@ -252,7 +252,17 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .child(chats.iter().find(|c| &c.id == id).map_or_else(|| avatar(title, 32.0), |c| chat_avatar(s, c, &session.user.id, 32.0)))
                     .child(text(title).font(type_::TITLE).color(t.text).truncate()))
                 // A growth stack, so a sent message and the viewport following it glide in as one.
-                .child(with_bar("messages", list, &s.msg_bar))
+                .child(with_bar("messages", list, &s.msg_bar).key(format!("history/{id}"))
+                    .on_layout_tx(|s: &mut State, _, tx| {
+                        if let Some(at) = s.restore_scroll.take() {
+                            tx.instant();
+                            if at.max[1] - at.offset[1] < 1.0 {
+                                tx.scroll_to_bottom_instant("messages");
+                            } else {
+                                tx.scroll_to_instant("messages", 0.0, at.offset[1]);
+                            }
+                        }
+                    }))
                 .child(col().w_full().items_center().px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
                     .child(col().w_full().max_w(1040.0).gap(6.0)
                     .children(s.reply_error.as_deref().map(|e| note(e).wrap()))

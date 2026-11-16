@@ -162,6 +162,10 @@ pub fn poll(s: &mut State) -> bool {
 /// A reconnect snapshot keeps names/avatars and recovers the latest message missed offline.
 fn reconcile(s: &mut State, fresh: Vec<Chat>) {
     if !matches!(s.screen, Screen::Main { .. }) { return; }
+    s.history = Default::default();
+    s.prefetch.cancel();
+    s.prefetch_id = None;
+    s.prefetch_queue = fresh.iter().filter(|c| !c.channel).take(10).map(|c| c.id.clone()).collect();
     let selected = s.selected.clone();
     let mut notices = Vec::new();
     let mut reload = false;
@@ -226,6 +230,11 @@ fn receive(s: &mut State, mut chat: Chat, message: Option<Msg>, server_id: &str,
         chat.unread = arrived;
         chats.push(chat.clone());
         if !chat.channel { chats.sort_by(|a, b| b.time.cmp(&a.time)); }
+    }
+    if arrived && !open { history::invalidate(s, &chat.id); }
+    else { history::stop_prefetch(s, &chat.id); }
+    if let Some(page) = s.history.page_mut(&chat.id) {
+        apply_message(page, server_id, message.clone());
     }
     if here {
         if s.loader.is_pending() {
@@ -543,6 +552,68 @@ mod tests {
         let Screen::Main { chats, .. } = &s.screen else { panic!() };
         assert!(chats.is_empty());
     }
+    #[test]
+    fn cached_history_tracks_push_edits_deletes_and_reconnects() {
+        let mut s = signed_in();
+        let (chat, msg) = incoming("19:a", "1");
+        s.history.insert(chat.id.clone(), Page { msgs: vec![msg.clone()], older: Some("older".into()) });
+        let mut edited = msg.clone();
+        edited.text = "edited".into();
+        receive(&mut s, chat.clone(), Some(edited), "1", false);
+        assert_eq!(s.history.get(&chat.id).unwrap().msgs[0].text, "edited");
+        receive(&mut s, chat.clone(), None, "1", false);
+        assert!(s.history.get(&chat.id).unwrap().msgs.is_empty());
+        let mut own = msg;
+        own.mine = true;
+        receive(&mut s, chat.clone(), Some(own), "1", true);
+        assert_eq!(s.history.get(&chat.id).unwrap().msgs.len(), 1);
+        assert!(s.messages.is_none(), "prefetch must not select or acknowledge a chat");
+        reconcile(&mut s, vec![chat.clone()]);
+        assert!(s.history.get(&chat.id).is_none());
+    }
+
+    #[test]
+    fn background_arrivals_evict_history_positions_and_pending_prefetch() {
+        for (selected, focused, visible) in [(false, true, true), (true, false, true), (true, true, false)] {
+            let mut s = signed_in();
+            s.window_focused = focused;
+            s.window_visible = visible;
+            let (chat, message) = incoming("19:a", "1");
+            let page = Page { msgs: vec![message.clone()], older: None };
+            s.history.remember(chat.id.clone(), page.clone(), ScrollPos::default());
+            s.prefetch_queue.push_back(chat.id.clone());
+            s.prefetch_id = Some(chat.id.clone());
+            if selected {
+                s.selected = Some(chat.id.clone());
+                s.messages = Some(Ok(page.clone()));
+            }
+            receive(&mut s, chat.clone(), Some(message.clone()), "1", true);
+            assert!(conversation(&s, &chat.id).unwrap().unread);
+            assert!(s.history.get(&chat.id).is_none());
+            assert!(s.history.position(&chat.id).is_none());
+            assert!(s.prefetch_queue.is_empty());
+            assert!(s.prefetch_id.is_none());
+            // A late fetch and leaving the selected but unfocused chat must not undo eviction.
+            history::cache_page(&mut s, chat.id.clone(), page);
+            history::remember_selected(&mut s);
+            assert!(s.history.get(&chat.id).is_none());
+        }
+    }
+
+    #[test]
+    fn focused_arrivals_keep_cache_and_replays_do_not_evict_it() {
+        let mut s = signed_in();
+        let (chat, message) = incoming("19:a", "1");
+        s.selected = Some(chat.id.clone());
+        s.window_focused = true;
+        s.history.insert(chat.id.clone(), Page { msgs: vec![], older: None });
+        receive(&mut s, chat.clone(), Some(message.clone()), "1", true);
+        assert_eq!(s.history.get(&chat.id).unwrap().msgs.len(), 1);
+        s.window_focused = false;
+        receive(&mut s, chat.clone(), Some(message), "1", true);
+        assert!(s.history.get(&chat.id).is_some(), "a replay must not evict");
+    }
+
     #[test]
     fn incoming_chat_moves_first_and_notifies_once() {
         let mut s = signed_in();
