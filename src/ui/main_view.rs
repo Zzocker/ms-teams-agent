@@ -342,7 +342,7 @@ mod tests {
         rt.update(|_, tx| tx.focus("draft", false));
         rt.frame(0.0);
         let draft = rt.state.draft.text.clone();
-        rt.key(rune::KeyEvent { key: rune::Key::Command('e'), mods: rune::Mods { ctrl: true, cmd: true, alt: true, ..Default::default() } });
+        rt.key(rune::KeyEvent { key: rune::Key::Command('e'), mods: rune::Mods { ctrl: true, cmd: !cfg!(target_os = "macos"), alt: true, ..Default::default() } });
         rt.frame(0.0);
         assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("search") && e.focused));
         assert_eq!(rt.state.draft.text, draft);
