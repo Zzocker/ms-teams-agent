@@ -76,14 +76,15 @@ struct State {
     window: Option<rune::AppHandle<State>>,
     window_focused: bool,
     window_visible: bool,
-    reader: Latest<(String, String, Result<(), String>)>,
+    reader: Latest<(String, teams::ReadHorizon, Result<(), String>)>,
+    read_in_flight: bool,
     live_baseline: std::collections::HashMap<String, String>,
     delivered: std::collections::VecDeque<(String, String)>,
     loading_updates: Vec<(String, Option<Msg>)>,
     selected: Option<String>,
     /// The selected chat's messages; `None` while they load.
     messages: Option<Messages>,
-    loader: Latest<(String, Messages, Result<(), String>)>,
+    loader: Latest<(String, Messages)>,
     /// A fetch of the page before the loaded ones: the chat, the link it followed, the page.
     older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
@@ -159,6 +160,7 @@ fn init() -> State {
         window_focused: false,
         window_visible: true,
         reader: Latest::default(),
+        read_in_flight: false,
         live_baseline: Default::default(),
         delivered: Default::default(),
         loading_updates: Vec::new(),
@@ -252,18 +254,8 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         notifications::set_teams(s, result);
         changed = true;
     }
-    if let Some((id, r, read)) = s.loader.take() {
+    if let Some((id, r)) = s.loader.take() {
         if s.selected.as_ref() == Some(&id) {
-            if r.is_ok() && read.is_ok() && notifications::chat_open(s, &id)
-                && let Some(chat) = notifications::conversation_mut(s, &id) {
-                // A message arriving after this request's read marker still needs acknowledging.
-                if r.as_ref().ok().and_then(|p| p.msgs.last()).is_some_and(|m| m.time >= chat.time) {
-                    chat.unread = false;
-                }
-            }
-            if let Err(error) = read {
-                s.reply_error = Some(format!("Could not save read status: {error}. Reopen the chat to retry."));
-            }
             s.messages = Some(match (s.messages.take(), r) {
                 (Some(Ok(pushed)), Ok(loaded)) => Ok(teams::merge(pushed, loaded)),
                 (_, result) => result,

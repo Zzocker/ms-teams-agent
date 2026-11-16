@@ -48,6 +48,7 @@ pub(crate) fn sign_out(s: &mut State) {
     s.live_attempt = None;
     s.live_status = None;
     s.reader.cancel();
+    s.read_in_flight = false;
     s.live_baseline.clear();
     s.delivered.clear();
     s.loading_updates.clear();
@@ -100,7 +101,6 @@ pub(crate) fn open_chat(s: &mut State, id: String) {
     s.reply_target = None;
     s.reply_error = None;
     let Screen::Main { session, .. } = &s.screen else { return };
-    let unread = s.window_focused && s.window_visible && notifications::conversation(s, &id).is_some_and(|c| c.unread);
     let session = session.clone();
     if s.selected.as_ref() != Some(&id) {
         // A draft belongs to the chat it was written in; it must not follow to another one.
@@ -112,13 +112,10 @@ pub(crate) fn open_chat(s: &mut State, id: String) {
     }
     (s.selected, s.messages) = (Some(id.clone()), None);
     s.loading_updates.clear();
+    notifications::mark_selected_read(s);
     s.loader.request(id, move |id| {
         let r = teams::messages(&session, &id);
-        let read = match &r {
-            Ok(page) if unread => teams::mark_read(&session, &id, page),
-            _ => Ok(()),
-        };
-        (id, r, read)
+        (id, r)
     });
 }
 

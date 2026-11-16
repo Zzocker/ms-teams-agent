@@ -117,6 +117,7 @@ pub(crate) fn set_teams(s: &mut State, result: Result<Vec<teams::Team>, String>)
                 channel.time = pending.time.clone();
                 channel.unread = pending.unread;
             }
+            channel.latest = channel.latest.iter().chain(&pending.latest).max_by_key(|h| h.server_id).cloned();
             false
         });
         teams
@@ -136,14 +137,10 @@ pub fn poll(s: &mut State) -> bool {
         }
     }
     if let Some((id, through, result)) = s.reader.take() {
-        match result {
-            Ok(()) => {
-                if let Some(chat) = conversation_mut(s, &id).filter(|c| c.time <= through) {
-                    chat.unread = false;
-                }
-            },
-            Err(error) => s.live_status = Some(format!("Could not save read status: {error}")),
-        }
+        s.read_in_flight = false;
+        let retry = result.is_ok() || s.selected.as_ref() != Some(&id);
+        complete_read(s, &id, &through, result);
+        if retry { mark_selected_read(s); }
         changed = true;
     }
     changed
@@ -163,6 +160,7 @@ fn reconcile(s: &mut State, fresh: Vec<Chat>) {
             let old = &chats[index];
             if chat.time < old.time { continue; }
             let arrived = chat.time > old.time;
+            chat.latest = old.latest.iter().chain(&chat.latest).max_by_key(|h| h.server_id).cloned();
             chat.title = old.title.clone();
             chat.avatar_id = old.avatar_id.clone();
             chat.avatar_members = old.avatar_members.clone();
@@ -202,15 +200,17 @@ fn receive(s: &mut State, mut chat: Chat, message: Option<Msg>, server_id: &str,
         chat.title = old.title.clone();
         chat.avatar_id = old.avatar_id.clone();
         chat.avatar_members = old.avatar_members.clone();
-        chat.unread = old.unread || (arrived && !open);
+        chat.unread = old.unread || arrived;
+        chat.latest = old.latest.iter().chain(&chat.latest).max_by_key(|h| h.server_id).cloned();
         if chat.time >= old.time {
             chats[i] = chat.clone();
             if new && !chat.channel { chats.sort_by(|a, b| b.time.cmp(&a.time)); }
-        } else if arrived && !open {
-            chats[i].unread = true;
+        } else {
+            chats[i].latest = chat.latest.clone();
+            if arrived { chats[i].unread = true; }
         }
     } else {
-        chat.unread = arrived && !open;
+        chat.unread = arrived;
         chats.push(chat.clone());
         if !chat.channel { chats.sort_by(|a, b| b.time.cmp(&a.time)); }
     }
@@ -239,34 +239,59 @@ pub fn apply_message(page: &mut Page, server_id: &str, message: Option<Msg>) {
 
 pub fn mark_selected_read(s: &mut State) {
     if s.waker.is_none() { return; } // Headless scenes never touch the network.
-    let (Screen::Main { session, .. }, Some(id), Some(Ok(page))) = (&s.screen, &s.selected, &s.messages) else { return };
-    if !chat_open(s, id) { return; }
+    let Some((id, through)) = selected_read(s) else { return };
+    let Screen::Main { session, .. } = &s.screen else { return };
     let session = session.clone();
-    let (id, page) = (id.clone(), page.clone());
-    let through = page.msgs.last().map(|m| m.time.clone()).unwrap_or_default();
+    if let Some(chat) = conversation_mut(s, &id) {
+        chat.latest = Some(through.clone());
+        chat.unread = true;
+    }
+    if s.read_in_flight { return; }
+    // Finish each acknowledgement before starting another, so server horizons cannot regress.
+    s.read_in_flight = true;
     s.reader.request(id, move |id| {
-        let result = teams::mark_read(&session, &id, &page);
+        let result = teams::mark_read(&session, &id, &through);
         (id, through, result)
     });
+}
+
+fn selected_read(s: &State) -> Option<(String, teams::ReadHorizon)> {
+    let id = s.selected.as_ref()?;
+    if !chat_open(s, id) { return None; }
+    let chat = conversation(s, id)?;
+    let loaded = s.messages.as_ref().and_then(|r| r.as_ref().ok()).into_iter().flat_map(|p| &p.msgs)
+        .filter_map(|m| teams::ReadHorizon::new(&m.server_id, &m.id)).max_by_key(|h| h.server_id);
+    let through = chat.latest.iter().chain(&loaded).max_by_key(|h| h.server_id)?.clone();
+    if !chat.unread && chat.latest.as_ref().is_some_and(|h| h.server_id >= through.server_id) { return None; }
+    Some((id.clone(), through))
+}
+
+fn complete_read(s: &mut State, id: &str, through: &teams::ReadHorizon, result: Result<(), String>) {
+    match result {
+        Ok(()) => {
+            if let Some(chat) = conversation_mut(s, id)
+                .filter(|c| c.latest.as_ref().is_some_and(|h| h.server_id <= through.server_id)) {
+                chat.unread = false;
+            }
+            if s.live_status.as_ref().is_some_and(|s| s.starts_with("Could not save read status:")) { s.live_status = None; }
+        }
+        Err(error) => s.live_status = Some(format!("Could not save read status: {error}. Reopen the conversation to retry.")),
+    }
 }
 
 fn refresh_selected(s: &mut State) {
     let (Screen::Main { session, .. }, Some(id)) = (&s.screen, &s.selected) else { return };
     let (session, id) = (session.clone(), id.clone());
-    let read = chat_open(s, &id);
+    mark_selected_read(s);
     s.loader.request(id, move |id| {
         let page = teams::messages(&session, &id);
-        let result = match &page { Ok(page) if read => teams::mark_read(&session, &id, page), _ => Ok(()) };
-        (id, page, result)
+        (id, page)
     });
 }
 
 pub fn focus(s: &mut State, focused: bool, _: &mut Tx) {
     s.window_focused = focused;
-    if focused && let Some(id) = &s.selected {
-        let unread = conversation(s, id).is_some_and(|c| c.unread);
-        if unread { mark_selected_read(s); }
-    }
+    if focused { mark_selected_read(s); }
 }
 
 pub fn visibility(s: &mut State, visible: bool, _: &mut Tx) {
@@ -319,6 +344,73 @@ mod tests {
         let chat = teams::parse_chats(&serde_json::json!({"conversations":[{"id":id,"lastMessage":resource}]}), &auth::User::default()).pop().unwrap();
         let msg = teams::parse_messages(&serde_json::json!({"messages":[resource]}), "me").pop().unwrap();
         (chat, msg)
+    }
+
+    fn unread_selected() -> State {
+        let mut s = signed_in();
+        let (mut chat, _) = incoming("19:a", "101");
+        chat.unread = true;
+        if let Screen::Main { chats, .. } = &mut s.screen { chats.push(chat); }
+        s.selected = Some("19:a".into());
+        s.window_visible = true;
+        s.window_focused = true;
+        s
+    }
+
+    #[test]
+    fn read_target_uses_metadata_without_history_and_respects_visibility() {
+        let mut s = unread_selected();
+        assert!(s.messages.is_none());
+        assert_eq!(selected_read(&s).unwrap().1.server_id, 101);
+        s.messages = Some(Err("history unavailable".into()));
+        assert_eq!(selected_read(&s).unwrap().1.server_id, 101);
+        s.window_focused = false;
+        assert!(selected_read(&s).is_none());
+        s.window_focused = true;
+        s.window_visible = false;
+        assert!(selected_read(&s).is_none());
+        s.window_visible = true;
+        conversation_mut(&mut s, "19:a").unwrap().latest = None;
+        assert!(selected_read(&s).is_none());
+        let (_, mut message) = incoming("19:a", "102");
+        s.messages = Some(Ok(Page { msgs: vec![message.clone()], older: None }));
+        assert_eq!(selected_read(&s).unwrap().1.server_id, 102);
+        message.server_id = "invalid".into();
+        s.messages = Some(Ok(Page { msgs: vec![message], older: None }));
+        assert!(selected_read(&s).is_none());
+    }
+
+    #[test]
+    fn older_read_acknowledgements_cannot_clear_newer_messages() {
+        let mut s = unread_selected();
+        let through = selected_read(&s).unwrap().1;
+        let (mut chat, mut message) = incoming("19:a", "102");
+        // Composition times can be equal; only the server message ID orders acknowledgements.
+        chat.time = "101".into();
+        message.time = "101".into();
+        s.read_in_flight = true;
+        s.waker = Some(Arc::new(|| {}));
+        receive(&mut s, chat, Some(message), "102", true);
+        assert!(!s.reader.is_pending(), "the older in-flight request must not be replaced");
+        complete_read(&mut s, "19:a", &through, Ok(()));
+        assert!(conversation(&s, "19:a").unwrap().unread);
+        let newer = selected_read(&s).unwrap().1;
+        assert_eq!(newer.server_id, 102);
+        complete_read(&mut s, "19:a", &newer, Err("offline".into()));
+        assert!(conversation(&s, "19:a").unwrap().unread);
+        assert!(s.live_status.as_ref().unwrap().contains("Reopen the conversation to retry"));
+        assert_eq!(selected_read(&s).unwrap().1, newer);
+        complete_read(&mut s, "19:a", &newer, Ok(()));
+        assert!(!conversation(&s, "19:a").unwrap().unread);
+        assert!(s.live_status.is_none());
+        assert!(selected_read(&s).is_none());
+        let (_, message) = incoming("19:a", "103");
+        s.messages = Some(Ok(Page { msgs: vec![message], older: None }));
+        mark_selected_read(&mut s);
+        assert!(!s.reader.is_pending());
+        complete_read(&mut s, "19:a", &newer, Ok(()));
+        assert!(conversation(&s, "19:a").unwrap().unread, "history arriving during an acknowledgement must also advance the horizon");
+        assert_eq!(selected_read(&s).unwrap().1.server_id, 103);
     }
 
     fn channel(time: &str) -> (Chat, Msg) {

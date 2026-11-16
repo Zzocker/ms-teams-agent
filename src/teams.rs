@@ -25,6 +25,21 @@ pub struct Chat {
     /// ISO 8601, UTC.
     pub time: String,
     pub unread: bool,
+    /// Server and client IDs available before message history loads.
+    pub latest: Option<ReadHorizon>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadHorizon {
+    pub server_id: u64,
+    pub client_id: String,
+}
+
+impl ReadHorizon {
+    pub fn new(server_id: &str, client_id: &str) -> Option<Self> {
+        if server_id.is_empty() || !server_id.bytes().all(|b| b.is_ascii_digit()) { return None; }
+        Some(Self { server_id: server_id.parse().ok()?, client_id: if client_id.is_empty() { server_id } else { client_id }.into() })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -285,12 +300,8 @@ pub fn messages(s: &Session, chat_id: &str) -> Result<Page, String> {
     Ok(page(&v, &s.user.id))
 }
 
-pub fn mark_read(s: &Session, chat_id: &str, page: &Page) -> Result<(), String> {
-    let Some(last) = page.msgs.iter().filter(|m| m.server_id.parse::<u64>().is_ok())
-        .max_by_key(|m| m.server_id.parse::<u64>().unwrap_or(0)) else {
-        return Err("No message ID available for the read marker.".into());
-    };
-    let body = read_marker(last, std::time::SystemTime::now()
+pub fn mark_read(s: &Session, chat_id: &str, horizon: &ReadHorizon) -> Result<(), String> {
+    let body = read_marker(horizon, std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_millis());
     let response = agent().put(&url(s, &format!("conversations/{}/properties?name=consumptionhorizon", encode(chat_id))))
         .header("Authentication", &auth(s)).send_json(&body).map_err(|e| e.to_string())?;
@@ -300,8 +311,8 @@ pub fn mark_read(s: &Session, chat_id: &str, page: &Page) -> Result<(), String> 
     Ok(())
 }
 
-fn read_marker(message: &Msg, read_at: u128) -> Value {
-    serde_json::json!({"consumptionhorizon": format!("{};{read_at};{}", message.server_id, message.id)})
+fn read_marker(horizon: &ReadHorizon, read_at: u128) -> Value {
+    serde_json::json!({"consumptionhorizon": format!("{};{read_at};{}", horizon.server_id, horizon.client_id)})
 }
 
 /// The page `link` (a [`Page::older`]) points to.
@@ -349,13 +360,17 @@ mod tests {
             id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
             text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(),
         };
-        let marker = super::read_marker(&message, 999);
+        let marker = super::read_marker(&ReadHorizon::new(&message.server_id, &message.id).unwrap(), 999);
         assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
         let chat = serde_json::json!({
             "properties": marker,
             "lastMessage": {"id": "101", "from": "8:orgid:other"}
         });
         assert!(!super::chat_unread(&chat, "me"));
+        for invalid in ["", "invalid", "+1", "18446744073709551616"] {
+            assert!(ReadHorizon::new(invalid, "client-123").is_none());
+        }
+        assert_eq!(ReadHorizon::new("101", "").unwrap().client_id, "101");
     }
 
     #[test]

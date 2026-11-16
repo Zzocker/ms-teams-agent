@@ -118,6 +118,8 @@ Order considers engineering effort first, then expected code change and uncertai
 
 ## 7. #7 — Unread handling must be independent of history loading
 
+**Status:** Resolved — user confirmed the fix on 16 November 2026. Conversation metadata retains validated latest server/client message IDs. Opening or focusing a visible conversation starts an independent read request without waiting for history; loaded history supplies a fallback when metadata is missing. Acknowledgements are serialized and checked against numeric server IDs so an older response cannot clear newer unread content. Failures retain unread state and show a message to reopen the conversation to retry. Hidden/unfocused conversations are excluded. Automated validation: 76 default-feature tests and 66 no-default-feature tests passed, with 2 ignored in each run. Individual manual checklist results were not supplied.
+
 **Reported:** “unread message are marked, after messages are loaded for that chat. make it independent.”
 
 **Interpretation:** Decouple unread/read-state handling from fetching history. The wording is ambiguous about marking unread versus clearing unread. Existing push handling already sets unread for inactive chats; reproduce that separately. QA should verify both immediate incoming unread indicators and correct acknowledgement when viewing a conversation.

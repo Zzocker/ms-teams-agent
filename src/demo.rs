@@ -3,7 +3,7 @@
 use crate::*;
 
 pub(crate) fn demo(s: &mut State) {
-    let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), channel: false, title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b" };
+    let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), channel: false, title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b", latest: None };
     let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new() };
     s.screen = Screen::Main {
         session: Arc::new(Session {
@@ -137,7 +137,7 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
         let channel = |id: &str, title: &str| Chat {
             channel: true,
             avatar_id: String::new(), avatar_members: Vec::new(),
-            id: id.into(), title: title.into(), preview: String::new(), time: String::new(), unread: false,
+            id: id.into(), title: title.into(), preview: String::new(), time: String::new(), unread: false, latest: None,
         };
         s.teams = Some(Ok(vec![
             teams::Team { id: "development".into(), title: "Development".into(), channels: vec![

@@ -25,6 +25,7 @@ pub(super) fn parse_teams(v: &Value) -> Result<Vec<Team>, String> {
                     preview: String::new(),
                     time: String::new(),
                     unread: false,
+                    latest: None,
                 })
             }).collect::<Result<_, String>>()?,
         })
@@ -101,6 +102,7 @@ pub(super) fn parse_conversations(v: &Value, me: &User) -> Vec<Chat> {
                 },
                 time: last["composetime"].as_str().unwrap_or("").into(),
                 unread: chat_unread(c, &me.id),
+                latest: ReadHorizon::new(last["id"].as_str().unwrap_or(""), last["clientmessageid"].as_str().unwrap_or("")),
             }
         })
         .collect();
@@ -227,6 +229,15 @@ mod tests {
         assert!(!super::chat_unread(&chat, "me"));
         chat["properties"] = serde_json::Value::Null;
         assert!(!super::chat_unread(&chat, "me"));
+    }
+
+    #[test]
+    fn conversation_list_retains_a_valid_read_horizon_without_loading_messages() {
+        let value = json!({"conversations":[{"id":"19:group@thread.v2", "lastMessage":{
+            "id":"123", "clientmessageid":"client-456", "content":"hello"
+        }}]});
+        let chats = parse_chats(&value, &User::default());
+        assert_eq!(chats[0].latest, ReadHorizon::new("123", "client-456"));
     }
 
     #[test]
