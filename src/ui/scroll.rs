@@ -9,6 +9,10 @@ pub(crate) struct Bar {
     at: Rc<Cell<ScrollPos>>,
 }
 
+impl Bar {
+    pub(crate) fn position(&self) -> ScrollPos { self.at.get() }
+}
+
 impl Default for Bar {
     fn default() -> Self {
         Bar { rect: Live::new([0.0; 4]), at: Rc::default() }
@@ -124,6 +128,72 @@ mod tests {
         rt.wheel_event(WheelEvent::new(0.0, 120.0).at(100.0, 200.0));
         for _ in 0..120 { rt.frame(1.0 / 120.0); }
         assert!((top(&rt) - before - 60.0).abs() < 0.5, "next wheel moves only half a notch: {}", top(&rt) - before);
+    }
+
+    #[test]
+    fn cached_chats_restore_independent_reading_positions() {
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let Screen::Main { session, chats } = &s.screen else { unreachable!() };
+            main_view(s, session, chats)
+        }
+        let mut s = init();
+        demo(&mut s);
+        let template = s.messages.as_ref().unwrap().as_ref().unwrap().msgs[0].clone();
+        let page = |prefix: &str| Page { older: None, msgs: (0..100).map(|i| {
+            let mut m = template.clone();
+            m.id = format!("{prefix}{i}");
+            m.text = format!("Message {i}");
+            m
+        }).collect() };
+        s.messages = Some(Ok(page("a")));
+        s.window_focused = true;
+        s.history.insert("b".into(), page("b"));
+        s.teams = Some(Ok(vec![]));
+        let mut rt = rune::Runtime::new(s, view, (1000.0, 680.0), rune::Env::new(true, 1.0));
+        for _ in 0..120 { rt.frame(1.0 / 60.0); }
+        rt.update(|_, tx| tx.scroll_to_instant("messages", 0.0, 300.0));
+        rt.frame(1.0 / 60.0);
+        let before = rt.state.msg_bar.at.get();
+        assert!(before.max[1] - before.offset[1] > 100.0);
+        rt.update(|s, _| open_chat(s, "b".into()));
+        for _ in 0..120 { rt.frame(1.0 / 60.0); }
+        let at = rt.state.msg_bar.at.get();
+        assert!((at.max[1] - at.offset[1]).abs() < 1.0, "new chat should start at bottom: {at:?}");
+        rt.update(|_, tx| tx.scroll_to_instant("messages", 0.0, 600.0));
+        rt.frame(1.0 / 60.0);
+        rt.update(|s, _| open_chat(s, "a".into()));
+        for _ in 0..120 { rt.frame(1.0 / 60.0); }
+        let at = rt.state.msg_bar.at.get();
+        assert!((at.offset[1] - 300.0).abs() < 1.0, "returning to A restores its reading position: {at:?}");
+        assert_eq!(rt.state.messages.as_ref().unwrap().as_ref().unwrap().msgs.len(), 100,
+            "older loaded history must survive switching chats");
+        rt.update(|s, _| open_chat(s, "b".into()));
+        for _ in 0..120 { rt.frame(1.0 / 60.0); }
+        assert!((rt.state.msg_bar.at.get().offset[1] - 600.0).abs() < 1.0,
+            "B retains its own reading position");
+        rt.update(|s, _| open_chat(s, "a".into()));
+        for _ in 0..120 { rt.frame(1.0 / 60.0); }
+        rt.update(|_, tx| tx.scroll_to_instant("messages", 0.0, 300.0));
+        rt.frame(1.0 / 60.0);
+        rt.update(|s, _| s.messages = Some(Ok(page("a"))));
+        for _ in 0..120 { rt.frame(1.0 / 60.0); }
+        assert!((rt.state.msg_bar.at.get().offset[1] - 300.0).abs() < 1.0,
+            "a refresh in the same chat must preserve the reading position");
+        rt.update(|s, _| open_chat(s, "a".into()));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.restore_scroll.is_none(), "reselecting the active chat needs no deferred restore");
+        assert!((rt.state.msg_bar.at.get().offset[1] - 300.0).abs() < 1.0);
+        rt.update(|_, tx| tx.scroll_to_bottom_instant("messages"));
+        rt.frame(1.0 / 60.0);
+        rt.update(|s, _| navigate(s, true));
+        rt.frame(1.0 / 60.0);
+        rt.update(|s, _| {
+            navigate(s, false);
+            open_chat(s, "a".into());
+        });
+        for _ in 0..120 { rt.frame(1.0 / 60.0); }
+        let at = rt.state.msg_bar.at.get();
+        assert!((at.max[1] - at.offset[1]).abs() < 1.0, "saved bottom position stays at bottom");
     }
 
     #[test]

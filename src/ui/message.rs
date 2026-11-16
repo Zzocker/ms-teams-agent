@@ -74,6 +74,7 @@ pub(crate) fn message_text(m: &Msg) -> El {
     })
         // Long URLs have no spaces to wrap at.
         .font(type_::BODY).color(t.text).wrap_anywhere().selectable(true)
+        .selection_style(rune::SelectionStyle::chromium())
         .on_link(|_: &mut State, url: &str, tx: &mut Tx| { let _ = tx.open_url(url); })
 }
 

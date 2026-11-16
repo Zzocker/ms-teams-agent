@@ -1,6 +1,6 @@
 [package]
 name = "ms-teams-agent"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2024"
 
 [dependencies]
@@ -16,6 +16,10 @@ flate2 = "1"
 uuid = { version = "1", features = ["v4"] }
 tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 pulldown-cmark = { version = "0.13", default-features = false, optional = true }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus = "6"
+futures-lite = "2"
 
 [features]
 default = ["image", "markdown"]

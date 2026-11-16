@@ -7,16 +7,19 @@ use std::ops::Range;
 
 mod html;
 mod media;
+mod mentions;
 mod parse;
 pub mod events;
 
 pub use html::*;
 pub use media::*;
+pub use mentions::*;
 pub use parse::*;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chat {
     pub id: String,
+    pub channel: bool,
     pub title: String,
     pub avatar_id: String,
     pub avatar_members: Vec<User>,
@@ -24,6 +27,21 @@ pub struct Chat {
     /// ISO 8601, UTC.
     pub time: String,
     pub unread: bool,
+    /// Server and client IDs available before message history loads.
+    pub latest: Option<ReadHorizon>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadHorizon {
+    pub server_id: u64,
+    pub client_id: String,
+}
+
+impl ReadHorizon {
+    pub fn new(server_id: &str, client_id: &str) -> Option<Self> {
+        if server_id.is_empty() || !server_id.bytes().all(|b| b.is_ascii_digit()) { return None; }
+        Some(Self { server_id: server_id.parse().ok()?, client_id: if client_id.is_empty() { server_id } else { client_id }.into() })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,6 +86,7 @@ pub struct Msg {
     pub files: Vec<File>,
     /// The HTML it came as, for an edit to keep what the text doesn't hold (quote, pictures).
     pub raw: String,
+    pub mentions: Vec<Mention>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,17 +133,25 @@ fn get(s: &Session, path: &str) -> Result<Value, String> {
     answer(agent().get(&url(s, path)).header("Authentication", &auth(s)).call())
 }
 
+fn edit_answer(res: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<(), String> {
+    let res = res.map_err(|e| e.to_string())?;
+    // Successful edits may have no body; only reads require JSON.
+    if res.status().is_success() { return Ok(()) }
+    answer(Ok(res)).map(|_| ())
+}
+
 /// Sends `text` and pictures (from [`upload_image`], with their pixel sizes) to a chat as the signed-in user.
 /// `id` is from [`new_msg_id`].
 /// Posts a message; with `quote`, as a reply quoting it.
-pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String, (u32, u32))], quote: Option<&Msg>) -> Result<(), String> {
-    let body = serde_json::json!({
-        "content": format!("{}{}", quote.map(reply_html).unwrap_or_default(), message_html(text, images)),
+pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String, (u32, u32))], quote: Option<&Msg>, mentions: &[Mention]) -> Result<(), String> {
+    let mut body = serde_json::json!({
+        "content": format!("{}{}", quote.map(reply_html).unwrap_or_default(), message_html(text, images, mentions)),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "clientmessageid": id,
         "imdisplayname": s.user.name,
     });
+    apply_mentions(&mut body, text, mentions)?;
     answer(agent().post(&url(s, &format!("conversations/{}/messages", encode(chat_id)))).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
 }
 
@@ -141,15 +168,16 @@ pub fn delete(s: &Session, chat_id: &str, server_id: &str) -> Result<(), String>
 
 /// Replaces a sent message's text with `text`, keeping its quoted reply and pictures, and adding
 /// `images` (from [`upload_image`]) after them.
-pub fn edit(s: &Session, chat_id: &str, server_id: &str, raw: &str, text: &str, images: &[(String, (u32, u32))]) -> Result<(), String> {
-    let body = serde_json::json!({
-        "content": edited_html(raw, text, images),
+pub fn edit(s: &Session, chat_id: &str, server_id: &str, raw: &str, text: &str, images: &[(String, (u32, u32))], mentions: &[Mention]) -> Result<(), String> {
+    let mut body = serde_json::json!({
+        "content": edited_html(raw, text, images, mentions),
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "imdisplayname": s.user.name,
     });
+    apply_mentions(&mut body, text, mentions)?;
     let url = url(s, &format!("conversations/{}/messages/{}", encode(chat_id), encode(server_id)));
-    answer(agent().put(&url).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
+    edit_answer(agent().put(&url).header("Authentication", &auth(s)).send_json(&body))
 }
 
 /// A fresh client message id. The service drops a repeat of one, so it must differ per message.
@@ -200,6 +228,10 @@ pub fn merge(old: Page, fresh: Page) -> Page {
 /// The chats with guessed titles; [`name_chats`] gives them their people's names.
 pub fn chats(s: &Session) -> Result<Vec<Chat>, String> {
     Ok(parse_chats(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user))
+}
+
+fn conversations(s: &Session) -> Result<Vec<Chat>, String> {
+    Ok(parse_conversations(&get(s, "conversations?view=msnp24Equivalent&pageSize=100")?, &s.user))
 }
 
 /// Resolves names and group avatar members after the initial chat list shows.
@@ -273,12 +305,8 @@ pub fn messages(s: &Session, chat_id: &str) -> Result<Page, String> {
     Ok(page(&v, &s.user.id))
 }
 
-pub fn mark_read(s: &Session, chat_id: &str, page: &Page) -> Result<(), String> {
-    let Some(last) = page.msgs.iter().filter(|m| m.server_id.parse::<u64>().is_ok())
-        .max_by_key(|m| m.server_id.parse::<u64>().unwrap_or(0)) else {
-        return Err("No message ID available for the read marker.".into());
-    };
-    let body = read_marker(last, std::time::SystemTime::now()
+pub fn mark_read(s: &Session, chat_id: &str, horizon: &ReadHorizon) -> Result<(), String> {
+    let body = read_marker(horizon, std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_millis());
     let response = agent().put(&url(s, &format!("conversations/{}/properties?name=consumptionhorizon", encode(chat_id))))
         .header("Authentication", &auth(s)).send_json(&body).map_err(|e| e.to_string())?;
@@ -288,8 +316,8 @@ pub fn mark_read(s: &Session, chat_id: &str, page: &Page) -> Result<(), String> 
     Ok(())
 }
 
-fn read_marker(message: &Msg, read_at: u128) -> Value {
-    serde_json::json!({"consumptionhorizon": format!("{};{read_at};{}", message.server_id, message.id)})
+fn read_marker(horizon: &ReadHorizon, read_at: u128) -> Value {
+    serde_json::json!({"consumptionhorizon": format!("{};{read_at};{}", horizon.server_id, horizon.client_id)})
 }
 
 /// The page `link` (a [`Page::older`]) points to.
@@ -318,18 +346,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn edit_responses_accept_success_without_requiring_json() {
+        let response = |status, body: &str| Ok(ureq::http::Response::builder()
+            .status(status).body(ureq::Body::builder().data(body)).unwrap());
+        for (status, body) in [(200, ""), (204, ""), (200, "{\"ok\":true}")] {
+            assert!(edit_answer(response(status, body)).is_ok());
+        }
+        assert!(edit_answer(response(401, "")).unwrap_err().contains("session expired"));
+        assert!(edit_answer(response(403, "{\"message\":\"Denied\"}")).unwrap_err().contains("Denied"));
+        assert!(edit_answer(response(500, "")).is_err());
+        assert!(edit_answer(Err(ureq::Error::StatusCode(503))).is_err());
+        assert!(answer(response(200, "")).is_err());
+    }
+
+    #[test]
     fn read_marker_keeps_server_and_client_message_ids_separate() {
         let message = super::Msg {
             id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
-            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(),
+            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), mentions: vec![],
         };
-        let marker = super::read_marker(&message, 999);
+        let marker = super::read_marker(&ReadHorizon::new(&message.server_id, &message.id).unwrap(), 999);
         assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
         let chat = serde_json::json!({
             "properties": marker,
             "lastMessage": {"id": "101", "from": "8:orgid:other"}
         });
         assert!(!super::chat_unread(&chat, "me"));
+        for invalid in ["", "invalid", "+1", "18446744073709551616"] {
+            assert!(ReadHorizon::new(invalid, "client-123").is_none());
+        }
+        assert_eq!(ReadHorizon::new("101", "").unwrap().client_id, "101");
     }
 
     #[test]
@@ -341,7 +387,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new() };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), mentions: vec![] };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);
@@ -352,7 +398,7 @@ mod tests {
     #[test]
     fn merge_keeps_push_messages_newer_than_a_fetch_in_flight() {
         let m = |id: &str| Msg { id:id.into(), server_id:id.into(), sender:String::new(), sender_id:String::new(),
-            text:id.into(), time:id.into(), mine:false, reply:None, images:vec![], links:vec![], files:vec![], raw:String::new() };
+            text:id.into(), time:id.into(), mine:false, reply:None, images:vec![], links:vec![], files:vec![], raw:String::new(), mentions:vec![] };
         let old = Page { msgs:vec![m("1"), m("3")], older:Some("older".into()) };
         let fetched = Page { msgs:vec![m("1"), m("2")], older:Some("older".into()) };
         assert_eq!(merge(old, fetched).msgs.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);

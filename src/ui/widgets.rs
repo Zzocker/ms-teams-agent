@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn self_chat_uses_own_photo() {
-        let chat = |id: &str| Chat { id: id.into(), avatar_id: String::new(), avatar_members: Vec::new(), title: String::new(), preview: String::new(), time: String::new(), unread: false };
+        let chat = |id: &str| Chat { id: id.into(), channel: false, avatar_id: String::new(), avatar_members: Vec::new(), title: String::new(), preview: String::new(), time: String::new(), unread: false, latest: None };
         let mut bot = chat("19:me_bot@unq.gbl.spaces");
         bot.avatar_id = "28:bot".into();
         assert_eq!(chat_avatar_id(&bot, "me"), "28:bot");

@@ -2,6 +2,7 @@
 //! A Teams desktop client: device-code sign-in that lasts across launches, then your chats.
 
 mod actions;
+mod history;
 mod auth;
 mod avatars;
 mod demo;
@@ -62,6 +63,7 @@ struct State {
     reply_highlight_on: bool,
     show_teams: bool,
     teams: Option<Result<Vec<teams::Team>, String>>,
+    pending_channels: Vec<Chat>,
     teams_loader: Latest<Result<Vec<teams::Team>, String>>,
     collapsed_teams: std::collections::HashSet<String>,
     /// Bumped on every sign-in attempt, cancel and sign-out; a worker from an older one is ignored.
@@ -75,18 +77,25 @@ struct State {
     window: Option<rune::AppHandle<State>>,
     window_focused: bool,
     window_visible: bool,
-    reader: Latest<(String, String, Result<(), String>)>,
+    reader: Latest<(String, teams::ReadHorizon, Result<(), String>)>,
+    read_in_flight: bool,
     live_baseline: std::collections::HashMap<String, String>,
     delivered: std::collections::VecDeque<(String, String)>,
     loading_updates: Vec<(String, Option<Msg>)>,
     selected: Option<String>,
     /// The selected chat's messages; `None` while they load.
     messages: Option<Messages>,
-    loader: Latest<(String, Messages, Result<(), String>)>,
+    loader: Latest<(String, Messages)>,
+    history: history::History,
+    restore_scroll: Option<ScrollPos>,
+    prefetch: Latest<(String, Messages)>,
+    prefetch_queue: std::collections::VecDeque<String>,
+    prefetch_id: Option<String>,
     /// A fetch of the page before the loaded ones: the chat, the link it followed, the page.
     older_loader: Latest<(String, String, Messages)>,
     /// The message being written to the selected chat.
     draft: TextEdit,
+    mentions: MentionPicker,
     /// The draft open in the pop-up editor; its preview on, the writing side's share of the
     /// editor's width, and that width as last laid out.
     editor: bool,
@@ -99,7 +108,7 @@ struct State {
     pasted: Vec<(rune::ClipboardImage, rune::Image)>,
     /// A send in flight: the chat, the message's id, then its reloaded messages and the pictures'
     /// URLs, or the error and the unsent text, pictures, and edited and quoted messages.
-    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, String, Vec<(rune::ClipboardImage, rune::Image)>, (Option<Msg>, Option<Msg>))>)>,
+    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, TextEdit, Vec<(rune::ClipboardImage, rune::Image)>, (Option<Msg>, Option<Msg>))>)>,
     /// The message the draft replies to when sent.
     replying: Option<Msg>,
     /// The message whose "…" menu is open, by id.
@@ -145,6 +154,7 @@ fn init() -> State {
         show_teams: false,
         teams: None,
         teams_loader: Latest::default(),
+        pending_channels: Vec::new(),
         collapsed_teams: Default::default(),
         attempt: Arc::default(),
         events: mpsc::channel(),
@@ -157,14 +167,21 @@ fn init() -> State {
         window_focused: false,
         window_visible: true,
         reader: Latest::default(),
+        read_in_flight: false,
         live_baseline: Default::default(),
         delivered: Default::default(),
         loading_updates: Vec::new(),
         selected: None,
         messages: None,
         loader: Latest::default(),
+        history: Default::default(),
+        restore_scroll: None,
+        prefetch: Latest::default(),
+        prefetch_queue: Default::default(),
+        prefetch_id: None,
         older_loader: Latest::default(),
         draft: TextEdit::new(""),
+        mentions: Default::default(),
         editor: false,
         editor_preview: true,
         editor_split: 0.75,
@@ -188,14 +205,16 @@ fn init() -> State {
 fn setup(s: &mut State, waker: Waker) {
     s.teams_loader.set_waker(waker.clone());
     s.loader.set_waker(waker.clone());
+    s.prefetch.set_waker(waker.clone());
     s.sender.set_waker(waker.clone());
+    s.mentions.setup(waker.clone());
     s.older_loader.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
     s.reader.set_waker(waker.clone());
     s.release_loader.set_waker(waker.clone());
     s.waker = Some(waker);
     // The app has no arguments of its own; any argument is Rune's headless tooling, which gets no network.
-    if std::env::args().len() == 1 {
+    if !cfg!(test) && std::env::args().len() == 1 {
         notifications::start(s);
         sign_in(s, false);
     }
@@ -207,6 +226,7 @@ fn reply_blink(elapsed: f32) -> Option<bool> {
 
 fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let mut changed = releases::poll(s);
+    changed |= s.mentions.poll(&s.selected);
     if let Some((_, started)) = &s.reply_highlight {
         if let Some(on) = reply_blink(started.elapsed().as_secs_f32()) {
             changed |= s.reply_highlight_on != on;
@@ -234,11 +254,14 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                 }
             }
         } else {
+            if let Screen::Main { chats, .. } = &screen {
+                s.prefetch_queue = chats.iter().take(10).map(|c| c.id.clone()).collect();
+            }
             s.screen = screen;
         }
         changed = true;
     }
-    if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
+    if !cfg!(test) && std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
         let mine = s.attempt.load(SeqCst);
         if s.live_attempt != Some(mine) {
             s.live_attempt = Some(mine);
@@ -247,27 +270,25 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
     }
     if let Some(result) = s.teams_loader.take() {
-        s.teams = Some(result);
+        notifications::set_teams(s, result);
         changed = true;
     }
-    if let Some((id, r, read)) = s.loader.take() {
+    if let Some((id, r)) = s.loader.take() {
         if s.selected.as_ref() == Some(&id) {
-            if r.is_ok() && read.is_ok() && notifications::chat_open(s, &id) && let Screen::Main { chats, .. } = &mut s.screen
-                && let Some(chat) = chats.iter_mut().find(|chat| chat.id == id) {
-                // A message arriving after this request's read marker still needs acknowledging.
-                if r.as_ref().ok().and_then(|p| p.msgs.last()).is_some_and(|m| m.time >= chat.time) {
-                    chat.unread = false;
-                }
-            }
-            if let Err(error) = read {
-                s.reply_error = Some(format!("Could not save read status: {error}. Reopen the chat to retry."));
-            }
+            if let Ok(page) = &r { history::cache_page(s, id.clone(), page.clone()); }
             s.messages = Some(match (s.messages.take(), r) {
                 (Some(Ok(pushed)), Ok(loaded)) => Ok(teams::merge(pushed, loaded)),
+                (Some(Ok(cached)), Err(error)) => {
+                    s.live_status = Some(format!("Could not refresh messages: {error}"));
+                    Ok(cached)
+                }
                 (_, result) => result,
             });
             if let Some(Ok(page)) = &mut s.messages {
                 for (server_id, message) in s.loading_updates.drain(..) {
+                    if let Some(cached) = s.history.page_mut(&id) {
+                        notifications::apply_message(cached, &server_id, message.clone());
+                    }
                     notifications::apply_message(page, &server_id, message);
                 }
             } else { s.loading_updates.clear(); }
@@ -299,15 +320,18 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
     }
     if let Some((id, msg_id, r)) = s.deleter.take() {
+        history::invalidate(s, &id);
         match r {
             Ok(()) => if let (true, Some(Ok(page))) = (s.selected.as_ref() == Some(&id), &mut s.messages) {
                 page.msgs.retain(|m| m.id != msg_id);
+                s.loader.cancel();
             },
             Err(e) => s.send_error = Some(format!("Not deleted: {e}")),
         }
         changed = true;
     }
     if let Some((id, msg_id, r)) = s.sender.take() {
+        history::invalidate(s, &id);
         let here = s.selected.as_ref() == Some(&id);
         let r = r.map(|(fresh, urls)| {
             // The server's copy names the uploads; show them from the pasted pixels, not a download.
@@ -321,8 +345,10 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             let _ = urls;
             fresh
         });
+        if let Ok(Ok(page)) = &r { history::cache_page(s, id.clone(), page.clone()); }
         match r {
             Ok(Ok(fresh)) if here => {
+                s.loader.cancel();
                 s.messages = Some(Ok(match s.messages.take() {
                     Some(Ok(page)) => teams::merge(page, fresh),
                     _ => fresh,
@@ -344,7 +370,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                 }
                 // Give the text back, unless the user moved on to another chat or draft.
                 if here && s.draft.text.is_empty() {
-                    s.draft.replace_text(text);
+                    s.draft = text;
                 }
                 if here && s.pasted.is_empty() {
                     s.pasted = pasted;
@@ -354,7 +380,8 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         changed = true;
     }
     changed |= notifications::poll(s);
-    if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
+    history::poll(s);
+    if !cfg!(test) && std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
         let ids = std::iter::once(session.user.id.clone())
             .chain(chats.iter().map(|c| chat_avatar_id(c, &session.user.id).to_owned()))
             .chain(chats.iter().flat_map(|c| c.avatar_members.iter().take(3).map(|m| m.id.clone())))
@@ -429,6 +456,7 @@ fn main() {
         scenes: SCENES,
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(search_key),
         min_size: Some((640.0, 400.0)),
         families: ("Inter", "ui-monospace"),
         ..AppSpec::new("Teams", (1000.0, 680.0), init, view)
@@ -450,6 +478,35 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_refresh_preserves_cached_data_on_failure_and_replays_inflight_changes() {
+        let mut s = init();
+        demo(&mut s);
+        let page = s.messages.as_ref().unwrap().as_ref().unwrap().clone();
+        let deleted = page.msgs[0].server_id.clone();
+        s.loading_updates.push((deleted.clone(), None));
+        s.loader.request((), move |_| ("a".into(), Ok(page)));
+        let mut tx = Tx::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while s.loader.is_pending() {
+            poll(&mut s, 0.0, &mut tx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        poll(&mut s, 0.0, &mut tx);
+        assert!(!s.history.get("a").unwrap().msgs.iter().any(|m| m.server_id == deleted));
+        let count = s.messages.as_ref().unwrap().as_ref().unwrap().msgs.len();
+        s.loader.request((), |_| ("a".into(), Err("offline".into())));
+        while s.loader.is_pending() {
+            poll(&mut s, 0.0, &mut tx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        poll(&mut s, 0.0, &mut tx);
+        assert_eq!(s.messages.as_ref().unwrap().as_ref().unwrap().msgs.len(), count);
+        assert!(s.live_status.as_deref().unwrap().contains("offline"));
+    }
 
     #[test]
     fn reply_highlight_blinks_three_times_then_stops() {
