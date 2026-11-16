@@ -87,6 +87,8 @@ Order considers engineering effort first, then expected code change and uncertai
 
 ## 5. #3 — Notification sound does not work
 
+**Status:** Resolved — user confirmed the fix on 16 November 2026. Linux notifications now request the desktop theme's `message-new-instant` sound through the notification service. Existing event suppression and deduplication are unchanged. Local environment: GNOME 51.1 on Wayland, GNOME Shell notification service reporting sound support, event sounds and notification banners enabled, and the freedesktop sound installed. Automated validation: 67 tests passed, 2 ignored; the ignored native notification test was then run explicitly and accepted by GNOME. Individual manual checklist results were not supplied; other platforms remain unverified.
+
 **Reported:** No further reproduction details were supplied.
 
 **Code evidence and required fix:** `start()` in `src/notifications.rs` creates `notify-rust` notifications with title, body, icon, and action, but no explicit sound configuration. This alone does not prove the cause: the notification daemon and operating system may supply or suppress sound. Reproduce with desktop sound enabled, determine whether a supported sound hint suffices, and verify notification suppression/deduplication still applies. Any platform-specific solution must follow the supported desktop behavior.

@@ -12,8 +12,7 @@ pub fn start(s: &mut State) {
             let window = window.clone();
             // Each visible notification waits independently, so later messages can still notify.
             std::thread::spawn(move || {
-                let notification = notify_rust::Notification::new().appname("Teams").icon("ms-teams-agent")
-                    .summary(&title).body(&escape(&body)).action("default", "Open chat").show();
+                let notification = message_notification(&title, &body).show();
                 match notification {
                     Ok(notification) => notification.wait_for_action(|action| {
                         if action == "default" && let Some(window) = window {
@@ -26,6 +25,15 @@ pub fn start(s: &mut State) {
         }
     });
     s.notifications = Some(send);
+}
+
+fn message_notification(title: &str, body: &str) -> notify_rust::Notification {
+    let mut notification = notify_rust::Notification::new();
+    notification.appname("Teams").icon("ms-teams-agent")
+        .summary(title).body(&escape(body)).action("default", "Open chat");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    notification.sound_name("message-new-instant");
+    notification
 }
 
 fn escape(text: &str) -> String {
@@ -227,9 +235,18 @@ mod tests {
     #[test]
     #[ignore = "requires a desktop notification service; shows a brief test notification"]
     fn native_notification() {
-        notify_rust::Notification::new().appname("Teams").icon("ms-teams-agent")
-            .summary("Teams notifications").body("Background notifications are ready.")
+        message_notification("Teams notifications", "Notification sound test.")
             .timeout(2000).show().expect("desktop notification service");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn message_notification_requests_desktop_sound() {
+        let notification = message_notification("New message", "<hello> & welcome");
+        assert!(notification.hints.contains(&notify_rust::Hint::SoundName("message-new-instant".into())));
+        assert!(!notification.hints.contains(&notify_rust::Hint::SuppressSound(true)));
+        assert_eq!(notification.body, "&lt;hello&gt; &amp; welcome");
+        assert_eq!(notification.actions, ["default", "Open chat"]);
     }
     fn signed_in() -> State {
         let mut s = init();
