@@ -231,7 +231,16 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     .children(head.then(|| row().gap(8.0).items_center()
                         .children((!m.mine).then(|| text(m.sender.as_str()).font(type_::LABEL).color(t.text)))
                         .child(time)))
-                    .child(bubble);
+                    .child(bubble)
+                    .children(m.edited.then(|| note("Edited").font(type_::LABEL)))
+                    .children(message_state::delivery(s, m).map(|label| note(label).font(type_::LABEL)))
+                    .children((m.deleted && m.mine).then(|| {
+                        let m = m.clone();
+                        el().key(format!("undo/{}", m.id)).role("button").label("Undo delete").focusable(true)
+                            .cursor(rune::Cursor::Pointer).px(8.0).py(4.0).radius(4.0).hover(t.hover)
+                            .on_press(move |s: &mut State| message_state::undo(s, &m))
+                            .child(note(if s.message_state.restorer.is_pending() { "Restoring…" } else { "Undo" }).font(type_::LABEL))
+                    }));
                 let line = if m.mine {
                     line.justify_end().items_end().child(content)
                 } else {
@@ -268,6 +277,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             }
                         }
                     }))
+                .children(message_state::typing_label(s, id).map(|label| note(&label).font(type_::LABEL).px(28.0).py(6.0)))
                 .child(col().w_full().items_center().px(28.0).py(20.0)
                     .child(col().w_full().max_w(1040.0).gap(6.0)
                     .children(s.reply_error.as_deref().map(|e| note(e).wrap()))
@@ -387,7 +397,7 @@ mod tests {
         for dark in [false, true] {
             for (width, height) in [(640.0, 400.0), (1000.0, 680.0), (1280.0, 800.0)] {
                 let mut s = init();
-                demo(&mut s);
+                message_states_demo(&mut s);
                 let mut rt = rune::Runtime::new(s, view, (width, height), rune::Env::new(dark, 1.0));
                 for _ in 0..60 { rt.frame(1.0 / 60.0); }
                 let elements = rt.elements();

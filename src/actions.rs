@@ -36,6 +36,7 @@ pub(crate) fn sign_in(s: &mut State, interactive: bool) {
 }
 
 pub(crate) fn sign_out(s: &mut State) {
+    s.message_state.clear();
     s.mentions.reset();
     s.history = Default::default();
     s.restore_scroll = None;
@@ -107,6 +108,7 @@ pub(crate) fn navigate(s: &mut State, teams: bool) {
 }
 
 pub(crate) fn open_chat(s: &mut State, id: String) {
+    message_state::load_receipts(s, &id);
     history::remember_selected(s);
     #[cfg(feature = "image")]
     s.preview_rows.clear();
@@ -207,7 +209,7 @@ pub(crate) fn send(s: &mut State) {
         }
     } else if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files: vec![], raw: String::new(), reactions: vec![], mentions: mentions.clone() });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: mentions.clone() });
     }
     let draft = s.draft.clone();
     s.draft.clear();
@@ -283,14 +285,14 @@ pub(crate) fn start_reply(s: &mut State, m: &Msg) {
     s.send_error = None;
 }
 
-/// Deletes the message the user confirmed; it leaves the list once Teams has deleted it.
+/// Soft-deletes the confirmed message, keeping an Undo placeholder.
 pub(crate) fn delete_message(s: &mut State) {
     let (Screen::Main { session, .. }, Some(id), Some(m)) = (&s.screen, &s.selected, s.deleting.take()) else { return };
     let session = session.clone();
     s.send_error = None;
     s.deleter.request((id.clone(), m), move |(id, m)| {
         let r = teams::delete(&session, &id, &m.server_id);
-        (id, m.id, r)
+        (id, m, r)
     });
 }
 
