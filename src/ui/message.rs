@@ -6,6 +6,23 @@ use crate::*;
 #[path = "message/reaction_tests.rs"]
 mod reaction_tests;
 
+pub(crate) fn message_reactions(s: &State, m: &Msg) -> Option<El> {
+    if m.reactions.is_empty() { return None; }
+    let t = tok::theme(dark());
+    let me = match &s.screen { Screen::Main { session, .. } => session.user.id.as_str(), _ => "" };
+    Some(row().flex_wrap().gap(4.0).mt(4.0).children(m.reactions.iter().map(|r| {
+        let mine = r.mine(me);
+        let (message, key) = (m.clone(), r.key.clone());
+        el().key(format!("reaction/{}/{}", m.id, r.key)).role("button")
+            .label(format!("{}: {} reaction{}{}", r.key, r.users.len(), if r.users.len() == 1 { "" } else { "s" }, if mine { ", including you; remove reaction" } else { "; add reaction" }))
+            .focusable(true).px(6.0).py(3.0).radius(8.0).cursor(rune::Cursor::Pointer).hover(t.hover)
+            .fill(if mine { tok::accent(0, dark()).alpha(0.25) } else { t.bg })
+            .border(1.0, if mine { tok::accent(0, dark()) } else { t.separator })
+            .on_press(move |s: &mut State| react(s, &message, &key))
+            .child(text(format!("{} {}", r.emoji(), r.users.len())).font(type_::LABEL).color(t.text))
+    })))
+}
+
 /// The hover toolbar of a message the server has (its actions need its id): edit for one of
 /// mine, quote (reply) for someone else's, and "…" for the rest. It stays shown while its menu is open.
 pub(crate) fn message_actions(m: &Msg, shown: bool) -> Option<El> {
@@ -63,23 +80,6 @@ pub(crate) fn message_menu(s: &State) -> Option<El> {
         .child(item("menu-copy", "Copy text").on_press_tx(move |s: &mut State, tx| { tx.copy(copy.clone()); s.menu = None; }))
         .children(m.mine.then(|| item("menu-edit", "Edit").on_press(move |s: &mut State| start_edit(s, &edit))))
         .children(m.mine.then(|| item("menu-delete", "Delete").on_press(move |s: &mut State| { s.deleting = Some(delete.clone()); s.menu = None; }))))
-}
-
-pub(crate) fn message_reactions(s: &State, m: &Msg) -> Option<El> {
-    if m.reactions.is_empty() { return None; }
-    let t = tok::theme(dark());
-    let me = match &s.screen { Screen::Main { session, .. } => session.user.id.as_str(), _ => "" };
-    Some(row().flex_wrap().gap(4.0).mt(4.0).children(m.reactions.iter().map(|r| {
-        let mine = r.mine(me);
-        let (message, key) = (m.clone(), r.key.clone());
-        el().key(format!("reaction/{}/{}", m.id, r.key)).role("button")
-            .label(format!("{}: {} reaction{}{}", r.key, r.users.len(), if r.users.len() == 1 { "" } else { "s" }, if mine { ", including you; remove reaction" } else { "; add reaction" }))
-            .focusable(true).px(6.0).py(3.0).radius(8.0).cursor(rune::Cursor::Pointer).hover(t.hover)
-            .fill(if mine { tok::accent(0, dark()).alpha(0.25) } else { t.bg })
-            .border(1.0, if mine { tok::accent(0, dark()) } else { t.separator })
-            .on_press(move |s: &mut State| react(s, &message, &key))
-            .child(text(format!("{} {}", r.emoji(), r.users.len())).font(type_::LABEL).color(t.text))
-    })))
 }
 
 /// A message's text, its web links in the accent colour and opened in the browser on a click.
