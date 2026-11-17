@@ -7,7 +7,7 @@ pub(crate) fn button(key: &'static str, label: &'static str, primary: bool, on_p
     el().key(key).role("button").label(label).focusable(true).px(16.0).py(8.0).radius(8.0)
         .fill(if primary { tok::accent(0, dark()) } else { t.control_off }).cursor(rune::Cursor::Pointer)
         .on_press(on_press)
-        .child(text(label).font(type_::TITLE).color(t.text))
+        .child(text(label).font(type_::TITLE).color(if primary { t.bg } else { t.text }))
 }
 
 /// A circle with the name's initials, coloured by the name so a person keeps their colour.
@@ -63,7 +63,7 @@ pub(crate) fn loading_messages() -> El {
         .color(tok::theme(dark()).text_secondary).looping(rune::LoopSpec::rotation(0.9))
 }
 
-/// The rail's theme button: each press steps System → Dark → Light → System.
+/// Each press steps System → Dark → Light → System.
 pub(crate) fn theme_button(theme: Option<bool>) -> El {
     static SYSTEM: rune::Icon = rune::Icon {
         name: "theme-system", view: 24.0,
@@ -83,11 +83,11 @@ pub(crate) fn theme_button(theme: Option<bool>) -> El {
         Some(true) => (&DARK_ICON, "Dark"),
         Some(false) => (&LIGHT_ICON, "Light"),
     };
-    col().key("theme").role("button").label(format!("Theme: {label}")).focusable(true).w_full().center().gap(4.0).py(10.0).radius(6.0)
+    row().key("theme").role("button").label(format!("Theme: {label}")).focusable(true).w_full().items_center().gap(12.0).px(12.0).py(10.0).radius(6.0)
         .hover(t.hover).cursor(rune::Cursor::Pointer)
-        .on_press(|s: &mut State| s.theme = next_theme(s.theme))
+        .on_press(|s: &mut State| settings::set_theme(s, next_theme(s.theme)))
         .child(rune::icon(icon, 24.0).color(t.text))
-        .child(text(label).font(type_::LABEL).color(t.text))
+        .child(text(format!("Theme: {label}")).font(type_::BODY).color(t.text))
 }
 
 pub(crate) fn next_theme(theme: Option<bool>) -> Option<bool> {

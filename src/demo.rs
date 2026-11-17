@@ -64,6 +64,10 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
     ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
     ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
     ("main", demo),
+    ("conversation-empty", |s| { demo(s); s.selected = None; s.messages = None; }),
+    ("conversation-error", |s| { demo(s); s.messages = Some(Err("Check your connection and try again.".into())); }),
+    ("conversation-loading", |s| { demo(s); s.messages = None; }),
+    ("messages-empty", |s| { demo(s); s.messages = Some(Ok(Page { msgs: vec![], older: None })); }),
     ("message-states", message_states_demo),
     ("message-deleted", |s| { message_states_demo(s); if let Some(Ok(page)) = &mut s.messages { message_state::tombstone(&mut page.msgs[1]); } }),
     ("message-restored", |s| {
@@ -77,27 +81,27 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
         s.send_error = Some("Could not restore message: chat service 403 Forbidden".into());
     }),
 
-    ("updates", |s| { demo(s); s.release_panel = true; }),
+    ("updates", |s| { demo(s); s.settings_panel = true; s.settings_updates = true; }),
     ("updates-current", |s| {
-        demo(s); s.release_panel = true;
+        demo(s); s.settings_panel = true; s.settings_updates = true;
         s.release_status = releases::Status::Current;
         s.release_checked_at = Some(chrono::Local::now());
     }),
     ("updates-available", |s| {
-        demo(s); s.release_panel = true;
+        demo(s); s.settings_panel = true; s.settings_updates = true;
         s.release_status = releases::Status::Available(releases::Release {
             version: semver::Version::new(0, 1, 1),
             url: "https://github.com/Zzocker/ms-teams-agent/releases/tag/v0.1.1".into(),
         });
         s.release_checked_at = Some(chrono::Local::now());
     }),
-    ("updates-error", |s| { demo(s); s.release_panel = true; s.release_status = releases::Status::Failed; }),
+    ("updates-error", |s| { demo(s); s.settings_panel = true; s.settings_updates = true; s.release_status = releases::Status::Failed; }),
     ("reply", |s| {
         demo(s);
         if let Some(Ok(page)) = &mut s.messages {
             let original = page.msgs[0].clone();
             page.msgs[1].reply = Some(teams::Reply {
-                id: original.server_id, sender: original.sender, time: original.time, text: original.text,
+                id: original.server_id, sender: original.sender, sender_id: original.sender_id, time: original.time, text: original.text,
             });
             // A short answer: the quote must still widen the bubble.
             page.msgs[1].text = "Well done".into();

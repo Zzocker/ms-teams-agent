@@ -133,6 +133,11 @@ pub(super) fn reply_content(raw: &str) -> (Option<Reply>, (String, Vec<(Range<us
             Some((&quoted[start..open_end], &quoted[open_end + 1..end]))
         };
         let sender = element("strong").map(|(_, body)| html_to_text(body)).unwrap_or_default();
+        let sender_id = element("strong").and_then(|(tag, _)| {
+            let tail = tag.split_once("itemid=")?.1;
+            let quote = tail.chars().next()?;
+            matches!(quote, '\'' | '"').then(|| super::parse::avatar_id(tail[1..].split(quote).next().unwrap_or("")))
+        }).unwrap_or_default();
         let time = element("span").and_then(|(tag, _)| {
             let tail = tag.split_once("itemid=")?.1;
             let quote = tail.chars().next()?;
@@ -142,7 +147,7 @@ pub(super) fn reply_content(raw: &str) -> (Option<Reply>, (String, Vec<(Range<us
         let text = html_to_text(&quoted[quoted.find("<p")?..]);
         let mut body = raw[..start].to_owned();
         body.push_str(&raw[end + "</blockquote>".len()..]);
-        Some((Some(Reply { id, sender, time, text }), convert(&body)))
+        Some((Some(Reply { id, sender, sender_id, time, text }), convert(&body)))
     };
     parse().unwrap_or_else(|| (None, convert(raw)))
 }
@@ -150,6 +155,27 @@ pub(super) fn reply_content(raw: &str) -> (Option<Reply>, (String, Vec<(Range<us
 /// Teams message HTML as plain text: tags dropped, block ends as newlines, common entities decoded.
 pub fn html_to_text(html: &str) -> String {
     rich(html, false).0
+}
+
+/// Emoji-only messages use Teams' artwork; mixed text keeps its inline Unicode.
+#[cfg(any(feature = "image", test))]
+pub fn animated_emojis(raw: &str) -> Vec<(String, String, u16)> {
+    let mut emojis = Vec::new();
+    for tag in raw.split('<').filter_map(|tag| tag.strip_prefix("img ")).filter_map(|tag| tag.split('>').next()) {
+        if !tag.contains("schema.skype.com/Emoji") { continue; }
+        let attr = |name: &str| {
+            let tail = tag.split_once(&format!("{name}="))?.1;
+            let quote = tail.chars().next()?;
+            matches!(quote, '\'' | '"').then(|| tail[1..].split(quote).next().unwrap_or(""))
+        };
+        let Some(src) = attr("src") else { return vec![]; };
+        let Some((url, alt)) = super::emoji_animation(src).zip(attr("alt")) else { return vec![]; };
+        if alt.is_empty() { return vec![]; }
+        emojis.push((url, html_to_text(alt), 58));
+    }
+    let text: String = html_to_text(raw).chars().filter(|c| !c.is_whitespace()).collect();
+    let alts: String = emojis.iter().flat_map(|(_, alt, _)| alt.chars()).filter(|c| !c.is_whitespace()).collect();
+    if text == alts { emojis } else { vec![] }
 }
 
 /// [`html_to_text`] plus its `http(s)` links (byte ranges of the text and where they point), with
@@ -179,6 +205,12 @@ pub(super) fn rich(html: &str, fences: bool) -> (String, Vec<(Range<usize>, Stri
         let Some(j) = rest[i..].find('>') else { break };
         let inner = &rest[i + 1..i + j];
         let tag = inner.trim_start_matches('/').split([' ', '/']).next().unwrap_or("").to_ascii_lowercase();
+        if tag == "img" && inner.contains("schema.skype.com/Emoji")
+            && let Some((_, tail)) = inner.split_once("alt=")
+            && let Some(quote @ ('\'' | '"')) = tail.chars().next()
+            && let Some(alt) = tail[1..].split(quote).next() {
+            out.push_str(&decode(alt));
+        }
         // In a code block every <br> is a line, so blank lines between sections stay.
         if matches!(tag.as_str(), "br" | "p" | "div" | "li" | "tr" | "pre") && (!out.ends_with('\n') || pre.is_some() && tag == "br") {
             out.push('\n');
@@ -229,6 +261,8 @@ pub(super) fn rich(html: &str, fences: bool) -> (String, Vec<(Range<usize>, Stri
             }
         }
         rest = &rest[i + j + 1..];
+        // Teams formats Shift+Enter as <br> followed by a source newline, not a second break.
+        if tag == "br" { rest = rest.trim_start_matches(['\r', '\n']); }
     }
     if !rest.contains('<') {
         out.push_str(&decode(rest));
@@ -246,6 +280,47 @@ pub(super) fn rich(html: &str, fences: bool) -> (String, Vec<(Range<usize>, Stri
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn teams_emoji_images_remain_visible_and_keep_link_offsets() {
+        let emoji = r#"<span type="muscle"><img itemtype="http://schema.skype.com/Emoji" itemid="muscle-tone2" src="https://statics.teams.cdn.office.net/muscle.png" alt="💪🏼"></span>"#;
+        let raw = format!("<div>{emoji}{emoji}</div>");
+        let msgs = parse_messages(&json!({"messages":[{
+            "id":"101", "messagetype":"RichText/Html", "content":raw
+        }]}), "me");
+        assert_eq!(msgs[0].text, "💪🏼💪🏼");
+        assert!(msgs[0].images.is_empty());
+        assert_eq!(html_to_text(&raw), "💪🏼💪🏼");
+        let (text, links) = html_to_rich(&format!("{emoji}<a href=\"https://example.com\">link</a>"));
+        assert_eq!(text, "💪🏼link");
+        assert_eq!(&text[links[0].0.clone()], "link");
+        assert_eq!(html_to_text("<img itemtype='http://schema.skype.com/Emoji' alt='&lt;3'>"), "<3");
+        assert_eq!(html_to_text("<img itemtype='http://schema.skype.com/AMSImage' alt='picture'>"), "");
+        assert_eq!(html_to_text("<img itemtype='http://schema.skype.com/Emoji'>"), "");
+    }
+
+    #[test]
+    fn animated_emoji_messages_preserve_duplicates_and_skin_tone() {
+        let emoji = r#"<span><img itemtype="http://schema.skype.com/Emoji" src="https://statics.teams.cdn.office.net//evergreen-assets/personal-expressions/v2/assets/emoticons//muscle/default/100_f_s3.png?v=v45" alt="💪🏼"></span>"#;
+        let got = animated_emojis(&format!("<div>{emoji}{emoji}</div>"));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], got[1]);
+        assert_eq!(got[0].1, "💪🏼");
+        assert!(got[0].0.ends_with("/muscle/default/100_anim_f_s3.png"));
+        assert!(animated_emojis(&format!("Hello {emoji}")).is_empty());
+        assert!(animated_emojis(&emoji.replace("statics.teams.cdn.office.net", "example.com")).is_empty());
+        for bad in ["https://statics.teams.cdn.office.net.evil.test/evergreen-assets/personal-expressions/v2/assets/emoticons/muscle/default/100_f_s3.png", "https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/../default/100_f_s3.png"] {
+            assert!(super::super::emoji_animation(bad).is_none());
+        }
+    }
+
+    #[test]
+    fn small_blankface_asset_displays_as_a_large_animated_emoji() {
+        let raw = r#"<p><span title="Face without mouth" type="(blankface)" class="animated-emoticon-20-blankface"><img itemtype="http://schema.skype.com/Emoji" itemid="blankface" src="https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/blankface/default/20_f.png" title="Face without mouth" alt="😶" style="width:20px; height:20px"></span></p>"#;
+        let got = animated_emojis(raw);
+        assert_eq!(got, vec![("https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/blankface/default/100_anim_f.png".into(), "😶".into(), 58)]);
+        assert_eq!(html_to_text(raw), "😶");
+    }
 
     #[test]
     fn outgoing_links_round_trip_with_safe_html_and_correct_boundaries() {
@@ -281,6 +356,18 @@ mod tests {
         assert_eq!(links, text_links(text));
         let reply = format!("{raw}{html}");
         assert_eq!(reply_content(&reply).1.1.len(), 1);
+    }
+
+    #[test]
+    fn shift_enter_source_newlines_do_not_double_line_breaks() {
+        for raw in ["Hello<br>\r\nBye", "<p>Hello<br>\r\nBye</p>", "Hello<br>\nBye"] {
+            assert_eq!(html_to_text(raw), "Hello\nBye");
+            assert_eq!(html_to_rich(raw).0, "Hello\nBye");
+        }
+        let (text, links) = html_to_rich("Hello<br>\r\n<a href=\"https://example.com\">Bye</a>");
+        assert_eq!(text, "Hello\nBye");
+        assert_eq!(links, vec![(6..9, "https://example.com".into())]);
+        assert_eq!(html_to_text("<pre>a<br>\r\n<br>\r\nb</pre>"), "a\n\nb");
     }
 
     #[test]
@@ -332,7 +419,7 @@ mod tests {
         let html = format!("{}{}", super::reply_html(&m), super::message_html("ok", &[], &[]));
         assert!(html.contains(r#"itemid="8:orgid:oid-1""#));
         let (reply, (text, _)) = super::reply_content(&html);
-        assert_eq!(reply, Some(super::Reply { id: "1700000000000".into(), sender: "Bob <B>".into(), time: "2026-11-14T10:24:00.000Z".into(), text: "first second".into() }));
+        assert_eq!(reply, Some(super::Reply { id: "1700000000000".into(), sender: "Bob <B>".into(), sender_id: "oid-1".into(), time: "2026-11-14T10:24:00.000Z".into(), text: "first second".into() }));
         assert_eq!(text, "ok");
     }
 

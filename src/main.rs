@@ -2,6 +2,7 @@
 //! A Teams desktop client: device-code sign-in that lasts across launches, then your chats.
 
 mod actions;
+mod attachments;
 mod history;
 mod auth;
 mod avatars;
@@ -14,6 +15,7 @@ mod teams;
 mod notifications;
 mod message_state;
 mod releases;
+mod settings;
 mod ui;
 
 use actions::*;
@@ -42,7 +44,8 @@ struct State {
     message_state: message_state::MessageState,
     release_loader: Latest<Result<Option<releases::Release>, String>>,
     release_status: releases::Status,
-    release_panel: bool,
+    settings_panel: bool,
+    settings_updates: bool,
     release_checked_at: Option<chrono::DateTime<chrono::Local>>,
     release_open_error: bool,
     screen: Screen,
@@ -56,6 +59,7 @@ struct State {
     panel_width: f32,
     /// The picked theme: `None` follows the system, else dark or light.
     theme: Option<bool>,
+    settings_file: Option<std::path::PathBuf>,
     /// The picture open full-window, by preview URL; closed if it isn't in the open chat.
     #[cfg_attr(not(feature = "image"), allow(dead_code))]
     viewer: Option<String>,
@@ -108,9 +112,11 @@ struct State {
     editing: Option<Msg>,
     /// Pictures pasted into the draft, with their decoded thumbnails; sent with it.
     pasted: Vec<(rune::ClipboardImage, rune::Image)>,
+    attached: Vec<attachments::DraftFile>,
+    file_download: Latest<Result<(), String>>,
     /// A send in flight: the chat, the message's id, then its reloaded messages and the pictures'
-    /// URLs, or the error and the unsent text, pictures, and edited and quoted messages.
-    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, TextEdit, Vec<(rune::ClipboardImage, rune::Image)>, (Option<Msg>, Option<Msg>))>)>,
+    /// URLs, or the error and the unsent text, pictures, files, and edited and quoted messages.
+    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, TextEdit, Vec<(rune::ClipboardImage, rune::Image)>, Vec<attachments::DraftFile>, (Option<Msg>, Option<Msg>))>)>,
     /// The message the draft replies to when sent.
     replying: Option<Msg>,
     /// The message whose "…" menu is open, by id.
@@ -137,7 +143,8 @@ fn init() -> State {
         message_state: Default::default(),
         release_loader: Latest::default(),
         release_status: releases::Status::Idle,
-        release_panel: false,
+        settings_panel: false,
+        settings_updates: false,
         release_checked_at: None,
         release_open_error: false,
         screen: Screen::Loading,
@@ -148,8 +155,9 @@ fn init() -> State {
         preview_rows: Default::default(),
         #[cfg(feature = "image")]
         preview_viewport: Live::new([0.0; 4]),
-        panel_width: 320.0,
+        panel_width: settings::DEFAULT_PANEL_WIDTH,
         theme: None,
+        settings_file: None,
         viewer: None,
         reply_target: None,
         reply_error: None,
@@ -192,6 +200,8 @@ fn init() -> State {
         editor_w: 0.0,
         editing: None,
         pasted: Vec::new(),
+        attached: Vec::new(),
+        file_download: Latest::default(),
         sender: Latest::default(),
         replying: None,
         menu: None,
@@ -214,6 +224,7 @@ fn setup(s: &mut State, waker: Waker) {
     s.loader.set_waker(waker.clone());
     s.prefetch.set_waker(waker.clone());
     s.sender.set_waker(waker.clone());
+    s.file_download.set_waker(waker.clone());
     s.mentions.setup(waker.clone());
     s.older_loader.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
@@ -234,6 +245,10 @@ fn reply_blink(elapsed: f32) -> Option<bool> {
 
 fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let mut changed = releases::poll(s);
+    if let Some(result) = s.file_download.take() {
+        if let Err(e) = result { s.send_error = Some(format!("Attachment not saved: {e}")); }
+        changed = true;
+    }
     changed |= s.mentions.poll(&s.selected);
     if let Some((_, started)) = &s.reply_highlight {
         if let Some(on) = reply_blink(started.elapsed().as_secs_f32()) {
@@ -367,7 +382,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             }
             Ok(fresh) if here => s.messages = Some(fresh),
             Ok(_) => {}
-            Err((e, text, pasted, (editing, replying))) => {
+            Err((e, text, pasted, attached, (editing, replying))) => {
                 if let (true, Some(Ok(page))) = (here, &mut s.messages) {
                     page.msgs.retain(|m| m.id != msg_id);
                     // An edit that failed shows the message as it was.
@@ -386,6 +401,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                 if here && s.pasted.is_empty() {
                     s.pasted = pasted;
                 }
+                if here { s.attached.splice(0..0, attached); }
             }
         }
         changed = true;
@@ -458,15 +474,16 @@ fn rest(s: &mut State, _: &mut Tx) -> bool {
 fn view(s: &State, cx: &mut Cx<State>) -> El {
     DARK.with(|d| d.set(s.theme.unwrap_or_else(|| cx.system_dark())));
     let t = tok::theme(dark());
-    let title = |s: &str| text(s).font(type_::TITLE).color(t.text);
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary).wrap();
     let page = col().w_full().h_full().center().gap(14.0).padding(32.0).fill(t.bg);
     let content = match &s.screen {
-        Screen::Loading => page.child(note("Signing in…")),
-        Screen::Login(error) => page
-            .child(title("Microsoft Teams"))
-            .children(error.as_deref().map(note))
-            .child(button("sign-in", "Sign in with Microsoft", true, |s| sign_in(s, true))),
+        Screen::Loading => page.child(loading_messages().label("Signing in")).child(note("Signing in…")),
+        Screen::Login(error) => page.child(col().w_full().max_w(400.0).gap(16.0).padding(28.0).radius(16.0).fill(t.card).border(1.0, t.separator)
+            .child(text("Welcome to Teams").font(rune::TextStyle::new(26.0, 600.0)).color(t.text).wrap())
+            .child(note("Keep up with your chats and team channels in one place."))
+            .children(error.as_deref().map(|e| note(e).role("alert")))
+            .child(button("sign-in", "Sign in with Microsoft", true, |s| sign_in(s, true)))
+            .child(note("Continue with your work or school account.").font(type_::LABEL))),
         Screen::Code { user_code, url } => page
             .child(note("Enter this code at"))
             .child(text(url.as_str()).key("url").font(type_::BODY).color(t.text).selectable(true))
@@ -508,6 +525,7 @@ fn main() {
     let handle = app.handle();
     app = app.init(move || {
         let mut s = init();
+        if desktop { settings::restore(&mut s); }
         s.window = Some(handle);
         s
     });

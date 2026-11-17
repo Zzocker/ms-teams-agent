@@ -218,7 +218,7 @@ mod tests {
         draft.insert_pill(MRI, "@Alícia");
         let expected = draft_mentions(&draft);
         let id = s.selected.clone().unwrap();
-        s.sender.request((), move |_| (id, "failed-send".into(), Err(("offline".into(), draft, vec![], (None, None)))));
+        s.sender.request((), move |_| (id, "failed-send".into(), Err(("offline".into(), draft, vec![], vec![], (None, None)))));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut tx = Tx::default();
         while s.sender.is_pending() {

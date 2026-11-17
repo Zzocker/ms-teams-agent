@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
 
-// The Teams client can't get Graph tokens (AADSTS65002); it gets tokens for Teams' own API.
+// Sign-in starts with the Teams audience; other services request their own tokens on demand.
 const SCOPE: &str = "https://api.spaces.skype.com/.default offline_access";
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -202,6 +202,10 @@ pub fn renew(live: impl Fn() -> bool) -> Result<Session, String> {
 /// CSA uses a different audience from chat; request it only when Teams is opened.
 pub fn teams_access() -> Result<String, String> {
     access_for("https://chatsvcagg.teams.microsoft.com/.default offline_access")
+}
+
+pub fn graph_access() -> Result<String, String> {
+    access_for("https://graph.microsoft.com/.default offline_access")
 }
 
 /// For a SharePoint site's files API (file previews). Every preview needs one, so it's kept

@@ -2,7 +2,7 @@ use super::*;
 
 pub const REACTIONS: &[(&str, &str)] = &[
     ("like", "👍"), ("heart", "❤️"), ("laugh", "😂"),
-    ("surprised", "😮"), ("sad", "😢"), ("angry", "😠"),
+    ("surprised", "😮"), ("sad", "😢"), ("angry", "😠"), ("angryface", "😡"),
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +56,17 @@ pub fn react(s: &Session, chat: &str, message: &str, key: &str, remove: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn angryface_displays_emoji_without_changing_the_server_reaction_key() {
+        let reactions = parse_reactions(&serde_json::json!({"emotions":[{
+            "key":"angryface", "users":[{"mri":"8:orgid:other"}]
+        }]}));
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].key, "angryface");
+        assert_eq!(reactions[0].emoji(), "😡");
+        assert_eq!(reactions[0].users.len(), 1);
+    }
 
     #[test]
     fn parses_unique_users_and_string_encoded_emotions() {

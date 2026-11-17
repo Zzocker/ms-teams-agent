@@ -7,6 +7,7 @@ use std::ops::Range;
 
 mod html;
 mod media;
+mod files;
 mod mentions;
 mod parse;
 mod reactions;
@@ -14,6 +15,7 @@ pub mod events;
 
 pub use html::*;
 pub use media::*;
+pub(crate) use files::*;
 pub use mentions::*;
 pub use parse::*;
 pub use reactions::*;
@@ -82,7 +84,7 @@ pub struct Msg {
     pub edited: bool,
     pub deleted: bool,
     pub reply: Option<Reply>,
-    /// Preview URLs of the pictures it carries (pasted screenshots, image files), from [`ams_preview`].
+    /// Teams picture previews from [`ams_preview`] and public Giphy animation URLs.
     pub images: Vec<String>,
     /// Web links in `text`: byte ranges and their URLs, from [`html_to_rich`].
     pub links: Vec<(Range<usize>, String)>,
@@ -109,6 +111,7 @@ pub struct File {
 pub struct Reply {
     pub id: String,
     pub sender: String,
+    pub sender_id: String,
     pub time: String,
     pub text: String,
 }
@@ -145,10 +148,10 @@ fn edit_answer(res: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Re
     answer(Ok(res)).map(|_| ())
 }
 
-/// Sends `text` and pictures (from [`upload_image`], with their pixel sizes) to a chat as the signed-in user.
+/// Sends text, pictures (with pixel sizes), and uploaded file metadata as the signed-in user.
 /// `id` is from [`new_msg_id`].
 /// Posts a message; with `quote`, as a reply quoting it.
-pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String, (u32, u32))], quote: Option<&Msg>, mentions: &[Mention]) -> Result<(), String> {
+pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String, (u32, u32))], files: &[Value], quote: Option<&Msg>, mentions: &[Mention]) -> Result<(), String> {
     let mut body = serde_json::json!({
         "content": format!("{}{}", quote.map(reply_html).unwrap_or_default(), message_html(text, images, mentions)),
         "messagetype": "RichText/Html",
@@ -156,8 +159,18 @@ pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String,
         "clientmessageid": id,
         "imdisplayname": s.user.name,
     });
+    apply_files(&mut body, files);
     apply_mentions(&mut body, text, mentions)?;
     answer(agent().post(&url(s, &format!("conversations/{}/messages", encode(chat_id)))).header("Authentication", &auth(s)).send_json(&body)).map(|_| ())
+}
+
+/// Teams stores file cards as a JSON string in message properties.
+pub(super) fn apply_files(body: &mut Value, files: &[Value]) {
+    if files.is_empty() { return; }
+    // Keep a nonempty body for attachment-only messages, as the chat service expects.
+    if body["content"].as_str() == Some("") { body["content"] = "<p></p>".into(); }
+    body["properties"]["files"] = serde_json::to_string(files).unwrap().into();
+    body["properties"]["formatVariant"] = "TEAMS".into();
 }
 
 /// Deletes a sent message; Teams keeps a "This message has been deleted" stub.
