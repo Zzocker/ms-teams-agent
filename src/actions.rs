@@ -69,6 +69,9 @@ pub(crate) fn sign_out(s: &mut State) {
     s.collapsed_teams.clear();
     s.loader.cancel();
     s.sender.cancel();
+    s.file_download.cancel();
+    s.attached.clear();
+    s.pasted.clear();
     s.draft.clear();
     s.editing = None;
     s.editor = false;
@@ -81,6 +84,8 @@ pub(crate) fn sign_out(s: &mut State) {
 }
 
 pub(crate) fn navigate(s: &mut State, teams: bool) {
+    s.attached.clear();
+    s.pasted.clear();
     s.mentions.reset();
     history::remember_selected(s);
     s.restore_scroll = None;
@@ -118,6 +123,8 @@ pub(crate) fn open_chat(s: &mut State, id: String) {
     let Screen::Main { session, .. } = &s.screen else { return };
     let session = session.clone();
     if s.selected.as_ref() != Some(&id) {
+        s.attached.clear();
+        s.pasted.clear();
         s.mentions.reset();
         // A draft belongs to the chat it was written in; it must not follow to another one.
         s.draft.clear();
@@ -182,7 +189,11 @@ pub(crate) fn send(s: &mut State) {
     let (Screen::Main { session, .. }, Some(id)) = (&s.screen, &s.selected) else { return };
     let text = s.draft.text.clone();
     // One send at a time: `Latest` would drop the first one's answer.
-    if (text.trim().is_empty() && s.pasted.is_empty()) || s.sender.is_pending() {
+    if (text.trim().is_empty() && s.pasted.is_empty() && s.attached.is_empty()) || s.sender.is_pending() {
+        return;
+    }
+    if s.editing.is_some() && !s.attached.is_empty() {
+        s.send_error = Some("Cancel the edit to send the attached files as a new message.".into());
         return;
     }
     let session = session.clone();
@@ -190,6 +201,8 @@ pub(crate) fn send(s: &mut State) {
     history::invalidate(s, &id);
     let msg_id = teams::new_msg_id();
     let pasted = std::mem::take(&mut s.pasted);
+    let attached = std::mem::take(&mut s.attached);
+    let files = attached.iter().map(attachments::DraftFile::card).collect();
     // The pasted pictures show at once under local keys, until their uploads have URLs.
     let local: Vec<String> = (0..pasted.len()).map(|i| local_image(&msg_id, i)).collect();
     #[cfg(feature = "image")]
@@ -209,24 +222,25 @@ pub(crate) fn send(s: &mut State) {
         }
     } else if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), sender_id: q.sender_id.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: mentions.clone() });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), sender_id: q.sender_id.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files, raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: mentions.clone() });
     }
     let draft = s.draft.clone();
     s.draft.clear();
     s.mentions.dismiss();
     s.send_error = None;
-    s.sender.request((id, msg_id, text, pasted, editing, replying), move |(id, msg_id, text, pasted, editing, replying)| {
+    s.sender.request((id, msg_id, text, pasted, attached, editing, replying), move |(id, msg_id, text, pasted, mut attached, editing, replying)| {
         let sent = (|| {
             let urls = pasted.iter().map(|(png, _)| teams::upload_image(&session, &id, png.png())).collect::<Result<Vec<_>, _>>()?;
             let sized: Vec<_> = urls.iter().cloned().zip(pasted.iter().map(|(png, _)| png.size())).collect();
+            let files = attached.iter_mut().map(|file| teams::upload_file(&session, &id, file)).collect::<Result<Vec<_>, _>>()?;
             match &editing {
                 Some(e) => teams::edit(&session, &id, &e.server_id, &e.raw, &text, &sized, &mentions),
-                None => teams::send(&session, &id, &msg_id, &text, &sized, replying.as_ref(), &mentions),
+                None => teams::send(&session, &id, &msg_id, &text, &sized, &files, replying.as_ref(), &mentions),
             }.map(|()| urls)
         })();
         let r = match sent {
             Ok(urls) => Ok((teams::messages(&session, &id), urls)),
-            Err(e) => Err((e, draft, pasted, (editing, replying))),
+            Err(e) => Err((e, draft, pasted, attached, (editing, replying))),
         };
         (id, msg_id, r)
     });
@@ -271,6 +285,8 @@ pub(crate) fn paste_image(s: &mut State, png: &rune::ClipboardImage) {
 
 /// Puts `m`'s text in the box to replace it when sent.
 pub(crate) fn start_edit(s: &mut State, m: &Msg) {
+    s.attached.clear();
+    s.pasted.clear();
     s.draft = edit_draft(m);
     s.mentions.dismiss();
     (s.editing, s.replying, s.menu) = (Some(m.clone()), None, None);

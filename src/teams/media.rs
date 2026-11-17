@@ -2,6 +2,35 @@
 
 use super::*;
 
+/// A downloadable file in the media store. Only these URLs may receive a Skype token.
+pub fn ams_file(url: &str) -> Option<String> {
+    let preview = ams_preview(url)?;
+    let original = preview.strip_suffix("views/imgo")?.to_owned() + "views/original";
+    (url == original).then_some(original)
+}
+
+/// Save through a temporary file so failed downloads never truncate an existing document.
+pub fn download_file(s: &Session, url: &str, path: &std::path::Path) -> Result<(), String> {
+    let url = ams_file(url).ok_or("Invalid attachment URL.")?;
+    let mut res = agent().get(&url).header("Authorization", &format!("skype_token {}", s.skype_token))
+        .header("User-Agent", MEDIA_USER_AGENT).call().map_err(|e| e.to_string())?;
+    if !res.status().is_success() { return Err(format!("File download {}", res.status())); }
+    save_download(&mut res.body_mut().as_reader(), path)
+}
+
+fn save_download(reader: &mut impl std::io::Read, path: &std::path::Path) -> Result<(), String> {
+    let temporary = path.with_file_name(format!(".teams-download-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|e| e.to_string())?;
+        std::io::copy(reader, &mut output).map_err(|e| e.to_string())?;
+        output.sync_all().map_err(|e| e.to_string())?;
+        drop(output);
+        std::fs::rename(&temporary, path).map_err(|e| e.to_string())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(temporary); }
+    result
+}
+
 /// The media store derives the client platform from this and rejects requests it can't parse.
 pub(super) const MEDIA_USER_AGENT: &str = "Teams/24295.605.3225.8804/49";
 
@@ -98,4 +127,58 @@ pub fn emoji_animation(src: &str) -> Option<String> {
         _ => return None,
     };
     Some(format!("https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/{}/default/{file}", parts[5]))
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    #[test]
+    fn file_messages_round_trip_and_keep_mentions() {
+        let files = vec![serde_json::json!({"id":"0-file-id", "fileName":"Plan <final> & notes.PDF", "fileType":"pdf",
+            "objectUrl":"https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-file-id/views/original"})];
+        let mut body = serde_json::json!({"content":"", "messagetype":"RichText/Html"});
+        apply_files(&mut body, &files);
+        apply_mentions(&mut body, "", &[]).unwrap();
+        let msgs = parse_messages(&serde_json::json!({"messages":[body]}), "me");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "");
+        assert_eq!(msgs[0].files.len(), 1);
+        assert_eq!(msgs[0].files[0].name, "Plan <final> & notes.PDF");
+        assert_eq!(msgs[0].files[0].kind, "pdf");
+        assert!(ams_file(&msgs[0].files[0].url).is_some());
+        assert!(msgs[0].images.is_empty());
+    }
+
+    #[test]
+    fn download_tokens_are_confined_to_exact_media_store_file_urls() {
+        let valid = "https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-file-id/views/original";
+        assert_eq!(ams_file(valid).as_deref(), Some(valid));
+        for bad in ["https://evil.example/v1/objects/0-file-id/views/original",
+            "https://in-prod.asyncgw.teams.microsoft.com.evil.example/v1/objects/0-file-id/views/original",
+            "https://user@in-prod.asyncgw.teams.microsoft.com/v1/objects/0-file-id/views/original",
+            "https://in-prod.asyncgw.teams.microsoft.com/v1/objects/../views/original"] {
+            assert!(ams_file(bad).is_none(), "{bad}");
+        }
+        assert!(ams_file(&format!("{valid}?redirect=evil")).is_none());
+        assert!(ams_file(&valid.replace("views/original", "content/original")).is_none());
+    }
+
+    #[test]
+    fn download_failure_preserves_existing_file_and_cleans_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("teams-download-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("report.txt");
+        std::fs::write(&path, b"original").unwrap();
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { Err(std::io::Error::other("connection lost")) }
+        }
+        assert!(save_download(&mut Broken, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        save_download(&mut &b"downloaded"[..], &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"downloaded");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

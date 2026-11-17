@@ -2,6 +2,7 @@
 //! A Teams desktop client: device-code sign-in that lasts across launches, then your chats.
 
 mod actions;
+mod attachments;
 mod history;
 mod auth;
 mod avatars;
@@ -111,9 +112,11 @@ struct State {
     editing: Option<Msg>,
     /// Pictures pasted into the draft, with their decoded thumbnails; sent with it.
     pasted: Vec<(rune::ClipboardImage, rune::Image)>,
+    attached: Vec<attachments::DraftFile>,
+    file_download: Latest<Result<(), String>>,
     /// A send in flight: the chat, the message's id, then its reloaded messages and the pictures'
-    /// URLs, or the error and the unsent text, pictures, and edited and quoted messages.
-    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, TextEdit, Vec<(rune::ClipboardImage, rune::Image)>, (Option<Msg>, Option<Msg>))>)>,
+    /// URLs, or the error and the unsent text, pictures, files, and edited and quoted messages.
+    sender: Latest<(String, String, Result<(Messages, Vec<String>), (String, TextEdit, Vec<(rune::ClipboardImage, rune::Image)>, Vec<attachments::DraftFile>, (Option<Msg>, Option<Msg>))>)>,
     /// The message the draft replies to when sent.
     replying: Option<Msg>,
     /// The message whose "…" menu is open, by id.
@@ -197,6 +200,8 @@ fn init() -> State {
         editor_w: 0.0,
         editing: None,
         pasted: Vec::new(),
+        attached: Vec::new(),
+        file_download: Latest::default(),
         sender: Latest::default(),
         replying: None,
         menu: None,
@@ -219,6 +224,7 @@ fn setup(s: &mut State, waker: Waker) {
     s.loader.set_waker(waker.clone());
     s.prefetch.set_waker(waker.clone());
     s.sender.set_waker(waker.clone());
+    s.file_download.set_waker(waker.clone());
     s.mentions.setup(waker.clone());
     s.older_loader.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
@@ -239,6 +245,10 @@ fn reply_blink(elapsed: f32) -> Option<bool> {
 
 fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let mut changed = releases::poll(s);
+    if let Some(result) = s.file_download.take() {
+        if let Err(e) = result { s.send_error = Some(format!("Attachment not saved: {e}")); }
+        changed = true;
+    }
     changed |= s.mentions.poll(&s.selected);
     if let Some((_, started)) = &s.reply_highlight {
         if let Some(on) = reply_blink(started.elapsed().as_secs_f32()) {
@@ -372,7 +382,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             }
             Ok(fresh) if here => s.messages = Some(fresh),
             Ok(_) => {}
-            Err((e, text, pasted, (editing, replying))) => {
+            Err((e, text, pasted, attached, (editing, replying))) => {
                 if let (true, Some(Ok(page))) = (here, &mut s.messages) {
                     page.msgs.retain(|m| m.id != msg_id);
                     // An edit that failed shows the message as it was.
@@ -391,6 +401,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                 if here && s.pasted.is_empty() {
                     s.pasted = pasted;
                 }
+                if here { s.attached.splice(0..0, attached); }
             }
         }
         changed = true;

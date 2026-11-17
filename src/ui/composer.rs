@@ -118,7 +118,11 @@ pub(crate) fn draft_editor(s: &State) -> Option<El> {
                     .child(text(if s.editor_preview { "Preview on" } else { "Preview off" }).font(type_::LABEL).color(t.text)))
                 .child(button("editor-close", "Close", false, |s| s.editor = false)))
             .child(body)
+            .children(crate::attachments::draft_files(s))
             .child(row().w_full().justify_end().px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
+                .children(s.editing.is_none().then(|| el().key("editor-attach-file").role("button").label("Attach file from this device").focusable(true)
+                    .cursor(rune::Cursor::Pointer).padding(8.0).on_press_tx(crate::attachments::pick_file)
+                    .child(text("📎 Attach file").font(type_::LABEL).color(t.text))))
                 .child(button("editor-send", "Send", true, |s| { s.editor = false; send(s) })))))
 }
 

@@ -320,6 +320,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, dark()))))))
                     .child(row().w_full().flex_wrap().gap(8.0).items_end()
                         .child(col().grow(1.0).shrink().min_w(140.0).gap(8.0).px(16.0).py(14.0).radius(6.0).fill(t.card).border(1.0, t.text_secondary).border_sides([0.0, 0.0, 2.0, 0.0], brand)
+                            .children((!s.editor).then(|| crate::attachments::draft_files(s)).flatten())
                             .children((!s.pasted.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0)
                                 .children(s.pasted.iter().enumerate().map(|(i, (_, image))| pasted_image(image, i)))))
                             .children((!s.editor).then(|| mention_suggestions(s)).flatten())
@@ -335,7 +336,11 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             })
                             .children(composer_preview(s)))
                         .child(button("editor", "Editor", false, |s| s.editor = true))
-                        .child(button("send", "Send", true, send).fill(selected)))))
+                        .children(s.editing.is_none().then(|| el().key("attach-file").role("button").label("Attach file from this device").focusable(true)
+                            .cursor(rune::Cursor::Pointer).px(12.0).py(8.0).radius(8.0).fill(t.control_off).hover(t.hover)
+                            .on_press_tx(crate::attachments::pick_file)
+                            .child(text("📎 Attach file").font(type_::LABEL).color(t.text))))
+                        .child(button("send", if s.sender.is_pending() { "Sending…" } else { "Send" }, true, send).fill(selected)))))
         }
     };
     let body = row().w_full().grow(1.0).min_h(0.0).child(rail).child(sidebar).child(divider).child(pane);

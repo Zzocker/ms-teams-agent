@@ -139,11 +139,11 @@ pub(crate) fn file_card(s: &State, f: &teams::File) -> El {
         Some(None) => body.center().child(rune::icon(&DOC, 40.0).color(tint)),
         None => body,
     };
-    let url = f.url.clone();
+    let file = f.clone();
     col().w(W).radius(8.0).clip_rounded(8.0).fill(t.card).border(1.0, t.separator)
         .role("link").label(format!("Open {}", f.name)).help(f.url.as_str()).focusable(true)
         .cursor(rune::Cursor::Pointer).hover(t.hover)
-        .on_press_tx(move |_: &mut State, tx| { let _ = tx.open_url(&url); })
+        .on_press_tx(move |s: &mut State, tx| { if !file.url.is_empty() { crate::attachments::open_file(s, &file, tx); } })
         .child(row().w_full().items_center().gap(10.0).px(12.0).py(10.0).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
             .child(rune::icon(&DOC, 24.0).color(tint))
             .child(text(f.name.as_str()).font(type_::TITLE).color(t.text).truncate().min_w(0.0)))
