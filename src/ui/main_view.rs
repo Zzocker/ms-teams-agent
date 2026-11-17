@@ -9,6 +9,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let brand = rune::oklch(if dark() { 0.76 } else { 0.49 }, 0.16, 285.0);
     let selected = rune::oklch(if dark() { 0.32 } else { 0.95 }, 0.035, 285.0);
     let sent = rune::oklch(if dark() { 0.38 } else { 0.9 }, 0.065, 285.0);
+    let can_send = !s.sender.is_pending() && (!s.draft.text.trim().is_empty() || !s.pasted.is_empty() || !s.attached.is_empty());
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary);
 
     let chat_row = |c: &Chat, key: &str| {
@@ -17,7 +18,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         let title_font = if c.unread { rune::tok::TextStyle::new(13.0, 700.0) } else { type_::BODY };
         row().key(format!("{key}/{}", c.id)).role("button").label(if c.unread { format!("{}, unread messages", c.title) } else { c.title.clone() }).focusable(true)
             .w_full().gap(10.0).px(if s.show_teams { 30.0 } else { 10.0 }).py(10.0).radius(6.0).items_center()
-            .fill(if picked { selected } else { t.card }).hover(t.hover).cursor(rune::Cursor::Pointer)
+            .fill(if picked { selected } else { t.card }).border_sides([0.0, 0.0, 0.0, 3.0], if picked { brand } else { t.card }).hover(t.hover).cursor(rune::Cursor::Pointer)
             .on_press(move |s: &mut State| {
                 s.search.clear();
                 open_chat(s, id.clone());
@@ -66,6 +67,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         }
     } else {
         rows.extend(chats.iter().map(|c| chat_row(c, "chat")));
+        if chats.is_empty() { rows.push(note("Your recent conversations will appear here.").wrap().padding(16.0)); }
     }
     let visible: Vec<&Chat> = if s.show_teams {
         s.teams.as_ref().and_then(|r| r.as_ref().ok()).into_iter()
@@ -79,16 +81,16 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             .border(1.0, t.separator)
             .anchored_fit("search-box", Side::Bottom, Align::Start, 4.0)
             .child(note(if s.show_teams { "Channels" } else { "Chats" }).font(type_::LABEL).px(10.0).py(4.0))
-            .children(hits.is_empty().then(|| note("No matches.").px(10.0).py(8.0)))
+            .children(hits.is_empty().then(|| note("No matching names. Try a different name.").px(10.0).py(8.0)))
             .child(col().w_full().gap(2.0).children(hits).scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0))
     });
-    // Top bar, not the sidebar: search will cover messages too, not just chat names.
+    // Search stays in the top bar while results follow the current navigation section.
     let search = row().w_full().gap(20.0).items_center().px(20.0).py(10.0).fill(t.card).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
         .child(col().w(180.0).min_w(180.0).grow(1.0)
             .child(text("Teams").font(rune::tok::TextStyle::new(18.0, 700.0)).color(t.text)))
-        .child(col().key("search-box").w_full().max_w(560.0).min_w(0.0).shrink().px(12.0).py(6.0).radius(8.0).fill(t.bg)
-            .child(text_input(&s.search, type_::BODY).key("search").label("Search").color(t.text)
-                .placeholder("Search chats and channels", t.text_secondary)
+        .child(row().key("search-box").items_center().gap(8.0).w_full().max_w(560.0).min_w(0.0).shrink().px(12.0).py(6.0).radius(8.0).fill(t.bg)
+            .child(text_input(&s.search, type_::BODY).key("search").grow(1.0).min_w(0.0).label(if s.show_teams { "Search channel names" } else { "Search chat names" }).color(t.text)
+                .placeholder(if s.show_teams { "Search channel names" } else { "Search chat names" }, t.text_secondary)
                 .caret(t.text, tok::accent(0, dark()).alpha(0.3))
                 .on_edit(|s: &mut State| &mut s.search)
                 .on_key(|s: &mut State, e: &rune::KeyEvent, tx| {
@@ -96,7 +98,11 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     s.search.clear();
                     tx.blur();
                     true
-                })))
+                }))
+            .children((!query.is_empty()).then(|| el().key("clear-search").role("button").label("Clear search").focusable(true)
+                .px(8.0).py(4.0).radius(4.0).hover(t.hover).cursor(rune::Cursor::Pointer)
+                .on_press_tx(|s: &mut State, tx| { s.search.clear(); tx.focus("search", false); })
+                .child(text("Clear").font(type_::LABEL).color(t.text_secondary)))))
         .child(row().w(180.0).min_w(180.0).grow(1.0).gap(20.0).items_center().justify_end()
             .child(el().key("sign-out").role("button").label("Sign out").focusable(true)
                 .px(10.0).py(6.0).radius(6.0).hover(t.hover).cursor(rune::Cursor::Pointer).on_press(sign_out)
@@ -155,12 +161,20 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
 
     let pane = col().grow(1.0).shrink().h_full().min_w(0.0).min_h(0.0).fill(t.bg);
     let pane = match (&s.selected, &s.messages) {
-        (None, _) => pane.center().child(note(if s.show_teams { "Pick a channel." } else if chats.is_empty() { "No chats yet." } else { "Pick a chat." })),
+        (None, _) => pane.center().padding(24.0).child(col().key("conversation-empty").w_full().max_w(360.0).gap(12.0)
+            .child(rune::icon(if s.show_teams { &TEAMS_ICON } else { &CHAT_ICON }, 40.0).color(brand))
+            .child(text(if s.show_teams { "Connect with your team" } else { "Your conversations, together" }).font(rune::tok::TextStyle::new(22.0, 600.0)).color(t.text).wrap())
+            .child(note(if s.show_teams { "Choose a channel from the sidebar to catch up with your team." } else { "Choose a chat from the sidebar, or search for a conversation by name." }).wrap())),
         (Some(_), None) => {
             pane.key("messages-loading").center().motion(rune::Spring::NONE)
-                .child(loading_messages())
+                .gap(12.0).child(loading_messages()).child(note("Loading conversation…"))
         },
-        (Some(_), Some(Err(e))) => pane.center().padding(32.0).child(note(e).wrap()),
+        (Some(_), Some(Err(e))) => pane.center().padding(24.0).child(col().key("conversation-error").w_full().max_w(360.0).gap(12.0)
+            .child(text("Couldn’t load this conversation").font(type_::TITLE).color(t.text).wrap())
+            .child(note(e).wrap())
+            .child(button("retry-messages", "Try again", false, |s| {
+                if let Some(id) = s.selected.clone() { open_chat(s, id); }
+            }))),
         (Some(id), Some(Ok(page))) => {
             let msgs = &page.msgs;
             // Fetch older a screenful before the top, so it's usually in before the scroll gets there.
@@ -274,14 +288,16 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             let list = col().w_full().items_center().px(28.0).py(12.0)
                 .child(col().w_full().max_w(1040.0).gap(4.0).growth(GrowthSpec::default())
                     .children(bubbles)
-                    .children(msgs.is_empty().then(|| note("No messages."))))
+                    .children(msgs.is_empty().then(|| col().key("messages-empty").w_full().gap(6.0).py(24.0)
+                        .child(text("Start the conversation").font(type_::TITLE).color(t.text))
+                        .child(note("Send a message below to get things going.").wrap()))))
                 .scroll(ScrollSpec { stick_bottom: true }).scroll_anchor().grow(1.0).min_h(0.0);
             #[cfg(feature = "image")]
             let list = list.drawn_rect_into(&s.preview_viewport);
             pane.child(row().key("conversation-header").w_full().gap(12.0).px(24.0).py(16.0).items_center().fill(t.card).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
                     .child(chats.iter().find(|c| &c.id == id).map_or_else(|| avatar(title, 32.0), |c| chat_avatar(s, c, &session.user.id, 32.0)))
                     .child(text(title).font(rune::tok::TextStyle::new(18.0, 600.0)).color(t.text).truncate().shrink().min_w(0.0))
-                    .child(text("Chat").font(type_::TITLE).color(brand).px(12.0).py(8.0)
+                    .child(text(if chats.iter().any(|c| &c.id == id && !c.channel) { "Chat" } else { "Channel" }).font(type_::TITLE).color(brand).px(12.0).py(8.0)
                         .border_sides([0.0, 0.0, 3.0, 0.0], brand)))
                 // A growth stack, so a sent message and the viewport following it glide in as one.
                 .child(with_bar("messages", list, &s.msg_bar).key(format!("history/{id}"))
@@ -298,8 +314,8 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 .children(message_state::typing_label(s, id).map(|label| note(&label).font(type_::LABEL).px(28.0).py(6.0)))
                 .child(col().w_full().items_center().px(28.0).py(20.0)
                     .child(col().w_full().max_w(1040.0).gap(6.0)
-                    .children(s.reply_error.as_deref().map(|e| note(e).wrap()))
-                    .children(s.send_error.as_deref().map(|e| note(e).wrap()))
+                    .children(s.reply_error.as_deref().map(|e| note(e).wrap().role("alert").padding(10.0).radius(6.0).fill(t.card).border_sides([0.0, 0.0, 0.0, 3.0], brand)))
+                    .children(s.send_error.as_deref().map(|e| note(e).wrap().role("alert").padding(10.0).radius(6.0).fill(t.card).border_sides([0.0, 0.0, 0.0, 3.0], brand)))
                     .children(s.deleting.as_ref().map(|m| row().w_full().gap(12.0).items_center()
                         .child(note(&format!("Delete \"{}\"?", m.text.chars().take(60).collect::<String>())).font(type_::LABEL).truncate().shrink().min_w(0.0))
                         .child(el().key("delete-confirm").role("button").label("Delete message").focusable(true).cursor(rune::Cursor::Pointer)
@@ -328,7 +344,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             .children((!s.editor).then(|| mention_suggestions(s)).flatten())
                             // One box shows the draft at a time; behind the editor it would echo every key.
                             .child(if s.editor { note("Writing in the editor…") } else {
-                                auto_grow(draft_paste(text_input(&s.draft, type_::BODY).key("draft").label("Message").color(t.text)
+                                auto_grow(draft_paste(text_input(&s.draft, type_::BODY).key("draft").label("Message. Enter to send, Shift+Enter for a new line.").color(t.text)
                                     .placeholder("Type a message", t.text_secondary)
                                     .caret(t.text, tok::accent(0, dark()).alpha(0.3))
                                     .on_edit(|s: &mut State| &mut s.draft)
@@ -341,7 +357,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             .child(el().key("editor").role("button").label("Open message editor").focusable(true)
                                 .cursor(rune::Cursor::Pointer).px(10.0).py(7.0).radius(6.0).hover(t.hover)
                                 .on_press(|s: &mut State| s.editor = true)
-                                .child(text("Editor").font(type_::LABEL).color(t.text_secondary)))
+                                .child(text("Format").font(type_::LABEL).color(t.text_secondary)))
                             .children(s.editing.is_none().then(|| el().key("attach-file").role("button").label("Attach file from this device").focusable(true)
                                 .cursor(rune::Cursor::Pointer).px(10.0).py(7.0).radius(6.0).hover(t.hover)
                                 .on_press_tx(crate::attachments::pick_file)
@@ -350,11 +366,11 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                                     .child(text("Attach file").font(type_::LABEL).color(t.text_secondary)))))
                             .child(el().grow(1.0))
                             .child(el().key("send").role("button").label(if s.sender.is_pending() { "Sending…" } else { "Send" }).focusable(true)
-                                .cursor(rune::Cursor::Pointer).px(12.0).py(7.0).radius(7.0).fill(brand)
-                                .on_press(send)
+                                .disabled(!can_send).cursor(if can_send { rune::Cursor::Pointer } else { rune::Cursor::Default }).px(12.0).py(7.0).radius(7.0).fill(if can_send { brand } else { t.control_off })
+                                .on_press(move |s: &mut State| if can_send { send(s); })
                                 .child(row().gap(6.0).items_center()
-                                    .child(text(if s.sender.is_pending() { "Sending…" } else { "Send" }).font(type_::LABEL).color(t.bg))
-                                    .child(rune::icon(&SEND, 18.0).color(t.bg))))))))
+                                    .child(text(if s.sender.is_pending() { "Sending…" } else { "Send" }).font(type_::LABEL).color(if can_send { t.bg } else { t.text_secondary }))
+                                    .child(rune::icon(&SEND, 18.0).color(if can_send { t.bg } else { t.text_secondary }))))))))
         }
     };
     let body = row().w_full().grow(1.0).min_h(0.0).child(rail).child(sidebar).child(divider).child(pane);
@@ -536,6 +552,58 @@ mod tests {
                 assert!(draft.rect[1] > header.rect[1] + header.rect[3]);
             }
         }
+    }
+
+    #[test]
+    fn conversation_states_offer_guidance_and_retry_preserves_the_draft() {
+        for dark in [false, true] {
+            for scene in ["conversation-empty", "conversation-error", "conversation-loading", "messages-empty"] {
+                let mut s = init();
+                SCENES.iter().find(|(name, _)| *name == scene).unwrap().1(&mut s);
+                s.draft.replace_text("Keep this draft");
+                let mut rt = rune::Runtime::new(s, view, (640.0, 400.0), rune::Env::new(dark, 1.0));
+                for _ in 0..60 { rt.frame(1.0 / 60.0); }
+                let key = match scene {
+                    "conversation-loading" => "message-loader",
+                    "conversation-error" => "retry-messages",
+                    other => other,
+                };
+                let elements = rt.elements();
+                let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
+                let [x, y, w, h] = e.rect;
+                assert!(w > 0.0 && h > 0.0 && x >= 0.0 && y >= 0.0 && x + w <= 641.0 && y + h <= 401.0, "{scene}: {:?}", e.rect);
+                if scene == "conversation-error" {
+                    let (x, y) = rt.find("retry-messages").unwrap();
+                    rt.pointer_down(x, y);
+                    rt.pointer_up(x, y);
+                    rt.frame(0.0);
+                    assert!(rt.state.messages.is_none());
+                    assert_eq!(rt.state.selected.as_deref(), Some("a"));
+                    assert_eq!(rt.state.draft.text, "Keep this draft");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn send_availability_and_clear_search_follow_input() {
+        let mut s = init();
+        demo(&mut s);
+        let mut rt = rune::Runtime::new(s, view, (1000.0, 680.0), rune::Env::new(true, 1.0));
+        for draft in ["", "   ", "Hello"] {
+            rt.update(|s, tx| { s.draft.replace_text(draft); tx.focus("send", false); });
+            rt.frame(0.0);
+            let send = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("send")).unwrap();
+            assert_eq!(send.focused, !draft.trim().is_empty());
+        }
+        rt.update(|s, _| s.search.replace_text("Charles"));
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let (x, y) = rt.find("clear-search").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert!(rt.state.search.text.is_empty());
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("search") && e.focused));
     }
 
     #[test]

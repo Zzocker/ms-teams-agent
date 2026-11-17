@@ -7,7 +7,7 @@ pub(crate) fn button(key: &'static str, label: &'static str, primary: bool, on_p
     el().key(key).role("button").label(label).focusable(true).px(16.0).py(8.0).radius(8.0)
         .fill(if primary { tok::accent(0, dark()) } else { t.control_off }).cursor(rune::Cursor::Pointer)
         .on_press(on_press)
-        .child(text(label).font(type_::TITLE).color(t.text))
+        .child(text(label).font(type_::TITLE).color(if primary { t.bg } else { t.text }))
 }
 
 /// A circle with the name's initials, coloured by the name so a person keeps their colour.

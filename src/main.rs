@@ -474,15 +474,16 @@ fn rest(s: &mut State, _: &mut Tx) -> bool {
 fn view(s: &State, cx: &mut Cx<State>) -> El {
     DARK.with(|d| d.set(s.theme.unwrap_or_else(|| cx.system_dark())));
     let t = tok::theme(dark());
-    let title = |s: &str| text(s).font(type_::TITLE).color(t.text);
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary).wrap();
     let page = col().w_full().h_full().center().gap(14.0).padding(32.0).fill(t.bg);
     let content = match &s.screen {
-        Screen::Loading => page.child(note("Signing in…")),
-        Screen::Login(error) => page
-            .child(title("Microsoft Teams"))
-            .children(error.as_deref().map(note))
-            .child(button("sign-in", "Sign in with Microsoft", true, |s| sign_in(s, true))),
+        Screen::Loading => page.child(loading_messages().label("Signing in")).child(note("Signing in…")),
+        Screen::Login(error) => page.child(col().w_full().max_w(400.0).gap(16.0).padding(28.0).radius(16.0).fill(t.card).border(1.0, t.separator)
+            .child(text("Welcome to Teams").font(rune::TextStyle::new(26.0, 600.0)).color(t.text).wrap())
+            .child(note("Keep up with your chats and team channels in one place."))
+            .children(error.as_deref().map(|e| note(e).role("alert")))
+            .child(button("sign-in", "Sign in with Microsoft", true, |s| sign_in(s, true)))
+            .child(note("Continue with your work or school account.").font(type_::LABEL))),
         Screen::Code { user_code, url } => page
             .child(note("Enter this code at"))
             .child(text(url.as_str()).key("url").font(type_::BODY).color(t.text).selectable(true))

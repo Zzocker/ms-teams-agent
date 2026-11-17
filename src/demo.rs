@@ -64,6 +64,10 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
     ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
     ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
     ("main", demo),
+    ("conversation-empty", |s| { demo(s); s.selected = None; s.messages = None; }),
+    ("conversation-error", |s| { demo(s); s.messages = Some(Err("Check your connection and try again.".into())); }),
+    ("conversation-loading", |s| { demo(s); s.messages = None; }),
+    ("messages-empty", |s| { demo(s); s.messages = Some(Ok(Page { msgs: vec![], older: None })); }),
     ("message-states", message_states_demo),
     ("message-deleted", |s| { message_states_demo(s); if let Some(Ok(page)) = &mut s.messages { message_state::tombstone(&mut page.msgs[1]); } }),
     ("message-restored", |s| {
