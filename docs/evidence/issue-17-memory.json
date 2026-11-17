@@ -1,9 +1,0 @@
-{
-  "after_rest_kib": 47504,
-  "baseline_kib": 23864,
-  "before_rest_kib": 102720,
-  "cached_images_after": 1,
-  "cached_images_before": 3072,
-  "generated_images": 4096,
-  "visible_image_preserved": true
-}
