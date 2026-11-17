@@ -79,6 +79,8 @@ pub struct Msg {
     pub text: String,
     pub time: String,
     pub mine: bool,
+    pub edited: bool,
+    pub deleted: bool,
     pub reply: Option<Reply>,
     /// Preview URLs of the pictures it carries (pasted screenshots, image files), from [`ams_preview`].
     pub images: Vec<String>,
@@ -160,7 +162,7 @@ pub fn send(s: &Session, chat_id: &str, id: &str, text: &str, images: &[(String,
 
 /// Deletes a sent message; Teams keeps a "This message has been deleted" stub.
 pub fn delete(s: &Session, chat_id: &str, server_id: &str) -> Result<(), String> {
-    let url = url(s, &format!("conversations/{}/messages/{}", encode(chat_id), encode(server_id)));
+    let url = url(s, &format!("conversations/{}/messages/{}", encode(chat_id), encode(server_id))) + "?behavior=softDelete";
     let response = agent().delete(&url).header("Authentication", &auth(s)).call().map_err(|e| e.to_string())?;
     match response.status() {
         st if st.is_success() => Ok(()),
@@ -366,7 +368,7 @@ mod tests {
     fn read_marker_keeps_server_and_client_message_ids_separate() {
         let message = super::Msg {
             id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
-            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), reactions: vec![], mentions: vec![],
+            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: vec![],
         };
         let marker = super::read_marker(&ReadHorizon::new(&message.server_id, &message.id).unwrap(), 999);
         assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
@@ -390,7 +392,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), reactions: vec![], mentions: vec![] };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: vec![] };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);
@@ -401,9 +403,92 @@ mod tests {
     #[test]
     fn merge_keeps_push_messages_newer_than_a_fetch_in_flight() {
         let m = |id: &str| Msg { id:id.into(), server_id:id.into(), sender:String::new(), sender_id:String::new(),
-            text:id.into(), time:id.into(), mine:false, reply:None, images:vec![], links:vec![], files:vec![], raw:String::new(), mentions:vec![], reactions:vec![] };
+            text:id.into(), time:id.into(), mine:false, reply:None, images:vec![], links:vec![], files:vec![], raw:String::new(), mentions:vec![], edited:false, deleted:false, reactions:vec![] };
         let old = Page { msgs:vec![m("1"), m("3")], older:Some("older".into()) };
         let fetched = Page { msgs:vec![m("1"), m("2")], older:Some("older".into()) };
         assert_eq!(merge(old, fetched).msgs.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);
+    }
+}
+
+pub(super) fn message_flag(value: &Value) -> bool {
+    match value { Value::String(s) => !s.is_empty() && s != "0", Value::Number(n) => n.as_u64().is_some_and(|v| v > 0), _ => false }
+}
+
+pub fn restore(s: &Session, chat: &str, message: &str) -> Result<(), String> {
+    let endpoint = url(s, &format!("conversations/{}/messages/{}/properties?name=deletetime", encode(chat), encode(message)));
+    edit_answer(agent().delete(&endpoint).header("Authentication", &auth(s))
+        .force_send_body().send_json(&serde_json::json!({"deletetime":null})))
+}
+
+pub fn typing(s: &Session, chat: &str) -> Result<(), String> {
+    edit_answer(agent().post(&url(s, &format!("conversations/{}/messages", encode(chat))))
+        .header("Authentication", &auth(s)).send_json(&serde_json::json!({
+            "content":"", "contenttype":"Application/Message", "messagetype":"Control/Typing"
+        })))
+}
+
+pub fn read_receipts(s: &Session, chat: &str) -> Result<std::collections::HashMap<String, u64>, String> {
+    let v = answer(agent().get(&format!("{}/v1/threads/{}/consumptionhorizons", s.chat_service, encode(chat)))
+        .header("Authentication", &auth(s)).call())?;
+    Ok(parse_receipts(&v, &s.user.id))
+}
+
+fn parse_receipts(v: &Value, me: &str) -> std::collections::HashMap<String, u64> {
+    v["consumptionhorizons"].as_array().into_iter().flatten().filter_map(|r| {
+        let user = avatar_id(r["id"].as_str()?);
+        if user.is_empty() || user == me { return None; }
+        let through = r["consumptionhorizon"].as_str()?.split(';').next()?.parse::<u64>().ok()?;
+        Some((user, through))
+    }).collect()
+}
+
+pub(crate) fn restored_page(s: &Session, chat: &str, message: &str) -> Result<Page, String> {
+    let mut page = messages(s, chat)?;
+    let mut visited = std::collections::HashSet::new();
+    while !page.msgs.iter().any(|m| m.server_id == message && !m.deleted) {
+        let Some(link) = page.older.as_ref().filter(|link| visited.insert((*link).clone())) else {
+            return Err("Message restored, but its history is unavailable. Reopen the conversation to retry.".into());
+        };
+        page = older(s, link)?;
+    }
+    Ok(page)
+}
+
+#[cfg(test)]
+mod message_state_tests {
+    use super::*;
+
+    #[test]
+    fn receipts_exclude_self_and_ignore_invalid_horizons() {
+        let v = serde_json::json!({"consumptionhorizons":[
+            {"id":"8:orgid:me", "consumptionhorizon":"999;1;c1"},
+            {"id":"8:orgid:other", "consumptionhorizon":"101;1;c2"},
+            {"id":"8:orgid:invalid", "consumptionhorizon":"bad;1;c3"}
+        ]});
+        let receipts = parse_receipts(&v, "me");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts.get("other"), Some(&101));
+        assert!(parse_receipts(&Value::Null, "me").is_empty());
+    }
+
+    #[test]
+    fn edited_and_deleted_metadata_survive_history_parsing() {
+        let mut message = serde_json::json!({"id":"123", "from":"8:orgid:me", "messagetype":"RichText/Html", "content":"secret", "properties":{"edittime":123, "emotions":[{"key":"like","users":["8:orgid:other"]}]}});
+        let parse = |m: &Value| parse_messages(&serde_json::json!({"messages":[m]}), "me").pop().unwrap();
+        assert!(parse(&message).edited);
+        for key in ["deletetime", "deletionTime"] {
+            message["properties"][key] = "456".into();
+            let m = parse(&message);
+            assert!(m.deleted && !m.edited && m.mine);
+            assert_eq!(m.text, "This message was deleted.");
+            assert!(m.raw.is_empty() && m.reactions.is_empty());
+            message["properties"][key] = Value::Null;
+        }
+        message["deletetime"] = "456".into();
+        message["content"] = "".into();
+        assert!(parse(&message).deleted);
+        message["deletetime"] = Value::Null;
+        message["content"] = "restored".into();
+        assert!(!parse(&message).deleted);
     }
 }

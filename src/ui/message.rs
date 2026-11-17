@@ -29,7 +29,7 @@ pub(crate) fn message_actions(m: &Msg, shown: bool) -> Option<El> {
     static PENCIL: rune::Icon = rune::Icon { name: "msg-edit", view: 20.0, body: r#"<path d="M13.5 3.5l3 3L7 16H4v-3z M11.5 5.5l3 3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
     static QUOTE: rune::Icon = rune::Icon { name: "msg-quote", view: 20.0, body: r#"<path d="M4 11.5c0-3 1.5-5 4-5.5 M4 11.5h3.5v3.5H4z M11 11.5c0-3 1.5-5 4-5.5 M11 11.5h3.5v3.5H11z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
     static MORE: rune::Icon = rune::Icon { name: "msg-more", view: 20.0, body: r#"<circle cx="5" cy="10" r="1.3" fill="currentColor"/><circle cx="10" cy="10" r="1.3" fill="currentColor"/><circle cx="15" cy="10" r="1.3" fill="currentColor"/>"# };
-    if m.server_id.is_empty() { return None }
+    if m.server_id.is_empty() || m.deleted { return None }
     let t = tok::theme(dark());
     let button = |key: String, label: &'static str, icon: &'static rune::Icon| el().key(key).size(28.0, 28.0).center().radius(6.0)
         .role("button").label(label).focusable(true).cursor(rune::Cursor::Pointer).hover(t.hover)
@@ -59,6 +59,7 @@ pub(crate) fn message_actions(m: &Msg, shown: bool) -> Option<El> {
 pub(crate) fn message_menu(s: &State) -> Option<El> {
     let id = s.menu.as_deref()?;
     let m = s.messages.as_ref()?.as_ref().ok()?.msgs.iter().find(|m| m.id == id)?;
+    if m.deleted { return None; }
     let t = tok::theme(dark());
     let item = |key: &'static str, label: &'static str| row().key(key).role("menuitem").label(label).focusable(true)
         .w_full().px(12.0).py(6.0).radius(4.0).cursor(rune::Cursor::Pointer).hover(t.hover)

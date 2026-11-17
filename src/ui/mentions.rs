@@ -54,6 +54,7 @@ fn candidates(s: &State) -> Vec<auth::User> {
 }
 
 pub(crate) fn mention_changed(s: &mut State, _: &mut Tx) {
+    message_state::send_typing(s);
     s.mentions.dismissed = false;
     s.mentions.picked = 0;
     if query(&s.draft).is_none() { return; }

@@ -143,6 +143,7 @@ pub fn poll(s: &mut State) -> bool {
         if attempt != s.attempt.load(SeqCst) { continue; }
         changed = true;
         match update {
+            Update::Typing { chat, user, name, active } => s.message_state.typing(chat, user, name, active),
             Update::Session(fresh) => if let Screen::Main { session, .. } = &mut s.screen { *session = fresh; },
             Update::Status(status) => s.live_status = status,
             Update::Connected(fresh) => reconcile(s, fresh),
@@ -202,6 +203,7 @@ fn receive(s: &mut State, mut chat: Chat, message: Option<Msg>, server_id: &str,
     let here = s.selected.as_ref() == Some(&chat.id);
     if !matches!(s.screen, Screen::Main { .. }) { return; }
     // A replay or an edit can update a row, but cannot notify or move an old chat to the top.
+    if let Some(m) = &message { s.message_state.typing(chat.id.clone(), m.sender_id.clone(), String::new(), false); }
     let key = (chat.id.clone(), server_id.to_owned());
     let arrived = new && !s.delivered.contains(&key)
         && s.live_baseline.get(&chat.id).is_none_or(|time| chat.time > *time)
