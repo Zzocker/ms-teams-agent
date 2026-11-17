@@ -121,6 +121,7 @@ struct State {
     deleting: Option<Msg>,
     /// A delete in flight: the chat, the message's id, and how it went.
     deleter: Latest<(String, String, Result<(), String>)>,
+    reactor: Latest<(String, String, String, bool, Result<(), String>)>,
     send_error: Option<String>,
     /// Filters the chat list by name.
     search: TextEdit,
@@ -195,6 +196,7 @@ fn init() -> State {
         hovered_bar: None,
         deleting: None,
         deleter: Latest::default(),
+        reactor: Latest::default(),
         send_error: None,
         search: TextEdit::new(""),
         chat_bar: Bar::default(),
@@ -210,6 +212,7 @@ fn setup(s: &mut State, waker: Waker) {
     s.mentions.setup(waker.clone());
     s.older_loader.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
+    s.reactor.set_waker(waker.clone());
     s.reader.set_waker(waker.clone());
     s.release_loader.set_waker(waker.clone());
     s.waker = Some(waker);
@@ -380,6 +383,19 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         changed = true;
     }
     changed |= notifications::poll(s);
+    if let Some((chat, message, key, remove, result)) = s.reactor.take() {
+        match result {
+            Ok(()) => {
+                let me = match &s.screen { Screen::Main { session, .. } => session.user.id.clone(), _ => String::new() };
+                if s.selected.as_ref() == Some(&chat) && let Some(Ok(page)) = &mut s.messages {
+                    apply_reaction(page, &message, &key, &me, remove);
+                }
+                if let Some(page) = s.history.page_mut(&chat) { apply_reaction(page, &message, &key, &me, remove); }
+            }
+            Err(error) => s.send_error = Some(format!("Reaction not changed: {error}")),
+        }
+        changed = true;
+    }
     history::poll(s);
     if !cfg!(test) && std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
         let ids = std::iter::once(session.user.id.clone())

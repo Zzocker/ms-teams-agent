@@ -327,7 +327,7 @@ mod tests {
     fn replies_quote_as_teams_does_and_read_back() {
         let m = super::Msg {
             id: "c1".into(), server_id: "1700000000000".into(), sender: "Bob <B>".into(), sender_id: "oid-1".into(),
-            text: "first\nsecond".into(), time: "2026-11-14T10:24:00Z".into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), mentions: vec![],
+            text: "first\nsecond".into(), time: "2026-11-14T10:24:00Z".into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), reactions: vec![], mentions: vec![],
         };
         let html = format!("{}{}", super::reply_html(&m), super::message_html("ok", &[], &[]));
         assert!(html.contains(r#"itemid="8:orgid:oid-1""#));

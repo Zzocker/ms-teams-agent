@@ -4,7 +4,6 @@ use crate::*;
 
 /// The hover toolbar of a message the server has (its actions need its id): edit for one of
 /// mine, quote (reply) for someone else's, and "…" for the rest. It stays shown while its menu is open.
-// shortcut: no reactions yet; add their buttons here when the client can send them.
 pub(crate) fn message_actions(m: &Msg, shown: bool) -> Option<El> {
     static PENCIL: rune::Icon = rune::Icon { name: "msg-edit", view: 20.0, body: r#"<path d="M13.5 3.5l3 3L7 16H4v-3z M11.5 5.5l3 3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
     static QUOTE: rune::Icon = rune::Icon { name: "msg-quote", view: 20.0, body: r#"<path d="M4 11.5c0-3 1.5-5 4-5.5 M4 11.5h3.5v3.5H4z M11 11.5c0-3 1.5-5 4-5.5 M11 11.5h3.5v3.5H11z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
@@ -48,10 +47,35 @@ pub(crate) fn message_menu(s: &State) -> Option<El> {
         .fill(t.card).border(1.0, t.separator).shadow(4.0, 16.0, rune::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.4 })
         .anchored(format!("more/{id}"), Side::Bottom, Align::End, 4.0)
         .modal(true, |s: &mut State| s.menu = None)
+        .child(text("React").font(type_::LABEL).color(t.text_secondary).px(8.0).py(4.0))
+        .child(row().gap(2.0).children(teams::REACTIONS.iter().map(|(key, emoji)| {
+            let m = m.clone();
+            el().key(format!("react/{key}")).role("button").label(format!("React {key}")).focusable(true)
+                .size(32.0, 32.0).center().radius(4.0).hover(t.hover).cursor(rune::Cursor::Pointer)
+                .on_press(move |s: &mut State| react(s, &m, key))
+                .child(text(*emoji).font(type_::BODY).color(t.text))
+        })))
         .children(m.mine.then(|| item("menu-reply", "Reply").on_press(move |s: &mut State| start_reply(s, &reply))))
         .child(item("menu-copy", "Copy text").on_press_tx(move |s: &mut State, tx| { tx.copy(copy.clone()); s.menu = None; }))
         .children(m.mine.then(|| item("menu-edit", "Edit").on_press(move |s: &mut State| start_edit(s, &edit))))
         .children(m.mine.then(|| item("menu-delete", "Delete").on_press(move |s: &mut State| { s.deleting = Some(delete.clone()); s.menu = None; }))))
+}
+
+pub(crate) fn message_reactions(s: &State, m: &Msg) -> Option<El> {
+    if m.reactions.is_empty() { return None; }
+    let t = tok::theme(dark());
+    let me = match &s.screen { Screen::Main { session, .. } => session.user.id.as_str(), _ => "" };
+    Some(row().flex_wrap().gap(4.0).mt(4.0).children(m.reactions.iter().map(|r| {
+        let mine = r.mine(me);
+        let (message, key) = (m.clone(), r.key.clone());
+        el().key(format!("reaction/{}/{}", m.id, r.key)).role("button")
+            .label(format!("{}: {} reaction{}{}", r.key, r.users.len(), if r.users.len() == 1 { "" } else { "s" }, if mine { ", including you; remove reaction" } else { "; add reaction" }))
+            .focusable(true).px(6.0).py(3.0).radius(8.0).cursor(rune::Cursor::Pointer).hover(t.hover)
+            .fill(if mine { tok::accent(0, dark()).alpha(0.25) } else { t.bg })
+            .border(1.0, if mine { tok::accent(0, dark()) } else { t.separator })
+            .on_press(move |s: &mut State| react(s, &message, &key))
+            .child(text(format!("{} {}", r.emoji(), r.users.len())).font(type_::LABEL).color(t.text))
+    })))
 }
 
 /// A message's text, its web links in the accent colour and opened in the browser on a click.
@@ -90,4 +114,94 @@ pub(crate) fn md_spans(md: &markdown::Md) -> Vec<rune::Span> {
             Style::Block => span.mono(),
         }
     }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, Read, Write};
+
+    #[test]
+    fn reaction_buttons_send_add_remove_and_preserve_counts_on_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (i, stream) in listener.incoming().take(4).enumerate() {
+                let mut stream = stream.unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut reader = std::io::BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request = line.trim().to_owned();
+                let mut length = 0;
+                loop {
+                    line.clear(); reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" { break; }
+                    if let Some((key, value)) = line.split_once(':')
+                        && key.eq_ignore_ascii_case("content-length") { length = value.trim().parse::<usize>().unwrap(); }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                requests.push((request, serde_json::from_slice::<serde_json::Value>(&body).unwrap()));
+                let response = if i == 3 { "HTTP/1.1 403 Forbidden\r\nContent-Length: 20\r\nConnection: close\r\n\r\n{\"message\":\"denied\"}" }
+                    else { "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n" };
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        let mut s = init();
+        demo(&mut s);
+        if let Screen::Main { session, .. } = &mut s.screen { Arc::make_mut(session).chat_service = format!("http://{address}"); }
+        let fixture = serde_json::json!({"messages":[{"id":"123","messagetype":"Text","content":"Test data: reaction check","from":"8:orgid:other",
+            "imdisplayname":"Charles Babbage","composetime":"2026-11-14T10:20:00Z",
+            "properties":{"emotions":[{"key":"like","users":[{"mri":"8:orgid:other"}]}]}}]});
+        let page = Page { msgs: teams::parse_messages(&fixture, "me"), older: None };
+        s.history.insert("a".into(), page.clone());
+        s.messages = Some(Ok(page));
+        s.waker = Some(Arc::new(|| {}));
+        let mut rt = rune::Runtime::new(s, view, (1200.0, 800.0), rune::Env::new(true, 1.0));
+        let click = |rt: &mut rune::Runtime<State>, key: &str| {
+            for _ in 0..60 { rt.frame(1.0 / 60.0); }
+            let (x, y) = rt.find(key).unwrap();
+            rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+        };
+        let finish = |rt: &mut rune::Runtime<State>| {
+            let start = std::time::Instant::now();
+            loop {
+                rt.update(|s, tx| { poll(s, 0.0, tx); }); rt.frame(0.0);
+                if !rt.state.reactor.is_pending() { break; }
+                assert!(start.elapsed().as_secs() < 5, "reaction request timed out");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            rt.update(|s, tx| { poll(s, 0.0, tx); }); rt.frame(0.0);
+        };
+        click(&mut rt, "reaction/123/like"); finish(&mut rt);
+        assert_eq!(rt.state.messages.as_ref().unwrap().as_ref().unwrap().msgs[0].reactions[0].users.len(), 2);
+        rt.update(|s, _| s.menu = Some("123".into()));
+        click(&mut rt, "react/heart"); finish(&mut rt);
+        click(&mut rt, "reaction/123/like"); finish(&mut rt);
+        let reactions = &rt.state.messages.as_ref().unwrap().as_ref().unwrap().msgs[0].reactions;
+        assert_eq!(reactions[0].users.len(), 1);
+        assert!(!reactions[0].mine("me"));
+        assert!(reactions[1].mine("me"));
+        assert_eq!(rt.state.history.page_mut("a").unwrap().msgs[0].reactions, *reactions);
+        rt.update(|s, _| s.menu = Some("123".into()));
+        click(&mut rt, "react/sad"); finish(&mut rt);
+        assert!(rt.state.send_error.as_ref().unwrap().contains("Reaction not changed"));
+        assert_eq!(rt.state.messages.as_ref().unwrap().as_ref().unwrap().msgs[0].reactions.len(), 2);
+        let requests = server.join().unwrap();
+        for (i, (request, body)) in requests.iter().enumerate() {
+            assert_eq!(request, &format!("{} /v1/users/ME/conversations/a/messages/123/properties?name=emotions HTTP/1.1", if i == 2 { "DELETE" } else { "PUT" }));
+            assert_eq!(body["emotions"]["key"], ["like", "heart", "like", "sad"][i]);
+            assert_eq!(body["emotions"]["value"].is_number(), i != 2);
+        }
+        if let Ok(path) = std::env::var("REACTION_EVIDENCE") {
+            rt.state.send_error = None;
+            rt.state.menu = None;
+            rt.state.waker = None;
+            rune::App::new(AppSpec::new("Reaction regression", (1200.0, 800.0), init, view))
+                .init(move || rt.state).args(["--snap".into(), path, "--scale".into(), "1".into()]).run();
+        }
+    }
 }

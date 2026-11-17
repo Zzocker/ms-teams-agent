@@ -148,7 +148,7 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
                 images,
                 links,
                 files,
-                raw: raw.into(), mentions,
+                raw: raw.into(), mentions, reactions: parse_reactions(&m["properties"]),
             })
         })
         .collect();

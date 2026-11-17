@@ -44,6 +44,7 @@ pub(crate) fn sign_out(s: &mut State) {
     s.prefetch_id = None;
     s.older_loader.cancel();
     s.deleter.cancel();
+    s.reactor.cancel();
     s.avatars = Default::default();
     #[cfg(feature = "image")]
     { s.images = Default::default(); }
@@ -206,7 +207,7 @@ pub(crate) fn send(s: &mut State) {
         }
     } else if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files: vec![], raw: String::new(), mentions: mentions.clone() });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files: vec![], raw: String::new(), reactions: vec![], mentions: mentions.clone() });
     }
     let draft = s.draft.clone();
     s.draft.clear();
@@ -232,6 +233,30 @@ pub(crate) fn send(s: &mut State) {
 /// The key a sent picture shows under before its upload has a URL.
 pub(crate) fn local_image(msg_id: &str, i: usize) -> String {
     format!("local:{msg_id}:{i}")
+}
+
+pub(crate) fn react(s: &mut State, message: &Msg, key: &str) {
+    if s.reactor.is_pending() || message.server_id.is_empty() || s.waker.is_none() { return; }
+    let (Screen::Main { session, .. }, Some(chat)) = (&s.screen, &s.selected) else { return };
+    let remove = message.reactions.iter().any(|r| r.key == key && r.mine(&session.user.id));
+    let (session, chat, message, key) = (session.clone(), chat.clone(), message.server_id.clone(), key.to_owned());
+    s.send_error = None;
+    s.menu = None;
+    s.reactor.request((), move |_| {
+        let result = teams::react(&session, &chat, &message, &key, remove);
+        (chat, message, key, remove, result)
+    });
+}
+
+pub(crate) fn apply_reaction(page: &mut Page, message: &str, key: &str, me: &str, remove: bool) {
+    let Some(m) = page.msgs.iter_mut().find(|m| m.server_id == message) else { return };
+    if let Some(reaction) = m.reactions.iter_mut().find(|r| r.key == key) {
+        reaction.users.retain(|u| u.rsplit(':').next() != Some(me));
+        if !remove { reaction.users.push(format!("8:orgid:{me}")); }
+    } else if !remove {
+        m.reactions.push(teams::Reaction { key: key.into(), users: vec![format!("8:orgid:{me}")] });
+    }
+    m.reactions.retain(|r| !r.users.is_empty());
 }
 
 /// Attach a pasted picture to the draft, decoding its thumbnail off the UI thread.
