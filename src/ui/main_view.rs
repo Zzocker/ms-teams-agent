@@ -4,23 +4,18 @@ use crate::*;
 
 pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let t = tok::theme(dark());
+    let brand = rune::oklch(if dark() { 0.76 } else { 0.49 }, 0.16, 285.0);
+    let selected = rune::oklch(if dark() { 0.32 } else { 0.95 }, 0.035, 285.0);
+    let sent = rune::oklch(if dark() { 0.38 } else { 0.9 }, 0.065, 285.0);
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary);
 
-    let me = col().gap(2.0).grow(1.0).min_w(0.0)
-        .child(text(session.user.name.as_str()).font(type_::TITLE).color(t.text).truncate())
-        .child(note(&session.user.email).truncate());
-    let header = row().w_full().gap(10.0).padding(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
-        .child(user_avatar(s, &session.user.id, &session.user.name, 36.0)).child(me)
-        .child(el().key("sign-out").role("button").label("Sign out").focusable(true).px(10.0).py(6.0).radius(6.0)
-            .fill(t.control_off).hover(t.hover).cursor(rune::Cursor::Pointer).on_press(sign_out)
-            .child(text("Sign out").font(type_::LABEL).color(t.text)));
     let chat_row = |c: &Chat, key: &str| {
         let id = c.id.clone();
         let picked = s.selected.as_ref() == Some(&c.id);
         let title_font = if c.unread { rune::tok::TextStyle::new(13.0, 700.0) } else { type_::BODY };
         row().key(format!("{key}/{}", c.id)).role("button").label(if c.unread { format!("{}, unread messages", c.title) } else { c.title.clone() }).focusable(true)
-            .w_full().gap(10.0).px(if s.show_teams { 30.0 } else { 10.0 }).py(8.0).radius(8.0).items_center()
-            .fill(if picked { t.press } else { t.card }).hover(t.hover).cursor(rune::Cursor::Pointer)
+            .w_full().gap(10.0).px(if s.show_teams { 30.0 } else { 10.0 }).py(10.0).radius(6.0).items_center()
+            .fill(if picked { selected } else { t.card }).hover(t.hover).cursor(rune::Cursor::Pointer)
             .on_press(move |s: &mut State| {
                 s.search.clear();
                 open_chat(s, id.clone());
@@ -28,10 +23,10 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             .children((!s.show_teams).then(|| chat_avatar(s, c, &session.user.id, 36.0)))
             .child(col().gap(2.0).grow(1.0).min_w(0.0)
                 .child(row().w_full().gap(8.0)
-                    .child(text(c.title.as_str()).font(title_font).color(if c.unread { t.text } else { t.text_secondary }).truncate().grow(1.0).min_w(0.0))
+                    .child(text(c.title.as_str()).font(title_font).color(t.text).truncate().grow(1.0).min_w(0.0))
                     .children((!c.time.is_empty()).then(|| text(&chat_time(&c.time, chrono::Local::now())).font(if c.unread { title_font } else { type_::LABEL }).color(if c.unread { t.text } else { t.text_secondary }))))
                 .child(row().w_full().gap(8.0).items_center()
-                    .children((!c.preview.is_empty()).then(|| text(&c.preview).font(if c.unread { type_::TITLE } else { type_::BODY }).color(if c.unread { t.text } else { t.text_secondary }).truncate().grow(1.0).min_w(0.0)))
+                    .children((!c.preview.is_empty()).then(|| text(&c.preview).font(type_::LABEL).color(if c.unread { t.text } else { t.text_secondary }).truncate().grow(1.0).min_w(0.0)))
                     .children(c.unread.then(|| el().size(8.0, 8.0).radius(4.0).fill(tok::accent(0, dark()))))))
     };
     let mut rows: Vec<El> = Vec::new();
@@ -86,10 +81,11 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             .child(col().w_full().gap(2.0).children(hits).scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0))
     });
     // Top bar, not the sidebar: search will cover messages too, not just chat names.
-    let search = row().w_full().justify_center().px(16.0).py(8.0).fill(t.card).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+    let search = row().w_full().gap(20.0).items_center().px(20.0).py(10.0).fill(t.card).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+        .child(text("Teams").font(rune::tok::TextStyle::new(18.0, 700.0)).color(t.text).w(180.0))
         .child(col().key("search-box").w_full().max_w(560.0).shrink().px(12.0).py(6.0).radius(8.0).fill(t.bg)
             .child(text_input(&s.search, type_::BODY).key("search").label("Search").color(t.text)
-                .placeholder("Search", t.text_secondary)
+                .placeholder("Search chats and channels", t.text_secondary)
                 .caret(t.text, tok::accent(0, dark()).alpha(0.3))
                 .on_edit(|s: &mut State| &mut s.search)
                 .on_key(|s: &mut State, e: &rune::KeyEvent, tx| {
@@ -97,7 +93,12 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     s.search.clear();
                     tx.blur();
                     true
-                })));
+                })))
+        .child(el().grow(1.0))
+        .child(el().key("sign-out").role("button").label("Sign out").focusable(true)
+            .px(10.0).py(6.0).radius(6.0).hover(t.hover).cursor(rune::Cursor::Pointer).on_press(sign_out)
+            .child(text("Sign out").font(type_::LABEL).color(t.text_secondary)))
+        .child(user_avatar(s, &session.user.id, &session.user.name, 32.0));
     let search = col().key("search-area").w_full().child(search);
     let search = if query.is_empty() { search } else {
         search.modal_tx(true, |s: &mut State, tx| { s.search.clear(); tx.blur(); })
@@ -106,9 +107,9 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0), &s.chat_bar);
     let sidebar = col().key("sidebar").w(s.panel_width).min_w(0.0).h_full().min_h(0.0)
         .motion(rune::Spring::NONE).clip_rounded(0.0).fill(t.card)
-        .child(header)
         .children(s.live_status.as_deref().map(|status| note(status).wrap().padding(12.0)))
-        .child(text(if s.show_teams { "Teams" } else { "Chat" }).font(type_::TITLE).color(t.text).padding(12.0))
+        .child(text(if s.show_teams { "Teams" } else { "Chat" }).font(rune::tok::TextStyle::new(22.0, 700.0)).color(t.text).px(20.0).py(20.0))
+        .child(note(if s.show_teams { "Your teams" } else { "Recent chats" }).font(type_::LABEL).px(20.0).py(8.0))
         .child(list);
     let divider = col().key("panel-resize").w(8.0).h_full().center().fill(t.card)
         .motion(rune::Spring::NONE).cursor(rune::Cursor::ResizeColumn)
@@ -126,7 +127,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
             if d.phase == Phase::Down { d.data = s.panel_width; }
             s.panel_width = if d.cancelled() { d.data } else { panel_width(d.data, d.dx) };
         })
-        .child(el().w(1.0).h_full().fill(t.text_secondary));
+        .child(el().w(1.0).h_full().fill(t.separator));
     static CHAT_ICON: rune::Icon = rune::Icon {
         name: "nav-chat", view: 24.0,
         body: r#"<path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z M7 9h10 M7 13h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>"#,
@@ -139,10 +140,10 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
         .fill(t.bg).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
         .children([(false, "Chat", &CHAT_ICON), (true, "Teams", &TEAMS_ICON)].into_iter().map(|(teams, label, icon)| {
             col().key(label).role("button").label(label).focusable(true).w_full().center().gap(4.0).py(10.0).radius(6.0)
-                .fill(if s.show_teams == teams { t.press } else { t.bg }).hover(t.hover).cursor(rune::Cursor::Pointer)
+                .fill(if s.show_teams == teams { selected } else { t.bg }).hover(t.hover).cursor(rune::Cursor::Pointer)
                 .on_press(move |s: &mut State| if s.show_teams != teams { navigate(s, teams) })
-                .child(rune::icon(icon, 24.0).color(t.text))
-                .child(text(label).font(type_::LABEL).color(t.text))
+                .child(rune::icon(icon, 24.0).color(if s.show_teams == teams { brand } else { t.text_secondary }))
+                .child(text(label).font(type_::LABEL).color(if s.show_teams == teams { brand } else { t.text_secondary }))
         }))
         .child(el().grow(1.0))
         .child(theme_button(s.theme))
@@ -167,8 +168,8 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 // Nearby messages from one sender share an avatar, name and timestamp.
                 let head = prev.is_none_or(|p| !same_message_group(p, m));
                 let time = note(&message_time(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL);
-                let bubble = col().max_w(860.0).shrink().min_w(0.0).px(12.0).py(8.0).radius(12.0)
-                    .fill(if m.mine { tok::accent(0, dark()).alpha(0.3) } else { t.card })
+                let bubble = col().max_w(720.0).shrink().min_w(0.0).px(12.0).py(10.0).radius(6.0)
+                    .fill(if m.mine { sent } else { t.card })
                     .border(2.0, tok::accent(0, dark()).alpha(if s.reply_highlight_on && s.reply_highlight.as_ref().is_some_and(|(id, _)| id == &m.id) { 1.0 } else { 0.0 }))
                     .children(m.reply.as_ref().map(|reply| {
                         let target = reply.id.clone();
@@ -228,7 +229,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 let content = col().gap(4.0).shrink().min_w(0.0);
                 let content = if m.mine { content.items_end() } else { content }
                     .children(head.then(|| row().gap(8.0).items_center()
-                        .child(text(m.sender.as_str()).font(type_::LABEL).color(t.text_secondary))
+                        .children((!m.mine).then(|| text(m.sender.as_str()).font(type_::LABEL).color(t.text)))
                         .child(time)))
                     .child(bubble);
                 let line = if m.mine {
@@ -237,20 +238,24 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     line.child(if head { user_avatar(s, &m.sender_id, &m.sender, 32.0) } else { el().w(32.0) })
                         .child(content)
                 };
-                let divider = new_day.then(|| row().key(format!("day/{}", m.id)).arrives_whole().w_full().justify_center().pt(10.0)
-                    .child(note(&message_date(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL)));
+                let divider = new_day.then(|| row().key(format!("day/{}", m.id)).arrives_whole().w_full().gap(12.0).items_center().pt(16.0).pb(8.0)
+                    .child(el().h(1.0).grow(1.0).fill(t.separator))
+                    .child(note(&message_date(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL))
+                    .child(el().h(1.0).grow(1.0).fill(t.separator)));
                 divider.into_iter().chain([line])
             });
-            let list = col().w_full().items_center().px(16.0).py(8.0)
+            let list = col().w_full().items_center().px(28.0).py(12.0)
                 .child(col().w_full().max_w(1040.0).gap(4.0).growth(GrowthSpec::default())
                     .children(bubbles)
                     .children(msgs.is_empty().then(|| note("No messages."))))
                 .scroll(ScrollSpec { stick_bottom: true }).scroll_anchor().grow(1.0).min_h(0.0);
             #[cfg(feature = "image")]
             let list = list.drawn_rect_into(&s.preview_viewport);
-            pane.child(row().w_full().gap(10.0).px(16.0).py(12.0).items_center().border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+            pane.child(row().key("conversation-header").w_full().gap(12.0).px(24.0).py(16.0).items_center().fill(t.card).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
                     .child(chats.iter().find(|c| &c.id == id).map_or_else(|| avatar(title, 32.0), |c| chat_avatar(s, c, &session.user.id, 32.0)))
-                    .child(text(title).font(type_::TITLE).color(t.text).truncate()))
+                    .child(text(title).font(rune::tok::TextStyle::new(18.0, 600.0)).color(t.text).truncate().shrink().min_w(0.0))
+                    .child(text("Chat").font(type_::TITLE).color(brand).px(12.0).py(8.0)
+                        .border_sides([0.0, 0.0, 3.0, 0.0], brand)))
                 // A growth stack, so a sent message and the viewport following it glide in as one.
                 .child(with_bar("messages", list, &s.msg_bar).key(format!("history/{id}"))
                     .on_layout_tx(|s: &mut State, _, tx| {
@@ -263,7 +268,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             }
                         }
                     }))
-                .child(col().w_full().items_center().px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
+                .child(col().w_full().items_center().px(28.0).py(20.0)
                     .child(col().w_full().max_w(1040.0).gap(6.0)
                     .children(s.reply_error.as_deref().map(|e| note(e).wrap()))
                     .children(s.send_error.as_deref().map(|e| note(e).wrap()))
@@ -287,8 +292,8 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                         .child(el().key("edit-cancel").role("button").label("Cancel edit").focusable(true).cursor(rune::Cursor::Pointer)
                             .on_press(|s: &mut State| { s.editing = None; s.draft.clear(); })
                             .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, dark()))))))
-                    .child(row().w_full().gap(8.0).items_end()
-                        .child(col().grow(1.0).shrink().min_w(0.0).gap(8.0).px(12.0).py(8.0).radius(8.0).fill(t.card)
+                    .child(row().w_full().flex_wrap().gap(8.0).items_end()
+                        .child(col().grow(1.0).shrink().min_w(140.0).gap(8.0).px(16.0).py(14.0).radius(6.0).fill(t.card).border(1.0, t.text_secondary).border_sides([0.0, 0.0, 2.0, 0.0], brand)
                             .children((!s.pasted.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0)
                                 .children(s.pasted.iter().enumerate().map(|(i, (_, image))| pasted_image(image, i)))))
                             .children((!s.editor).then(|| mention_suggestions(s)).flatten())
@@ -304,7 +309,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             })
                             .children(composer_preview(s)))
                         .child(button("editor", "Editor", false, |s| s.editor = true))
-                        .child(button("send", "Send", true, send)))))
+                        .child(button("send", "Send", true, send).fill(selected)))))
         }
     };
     let body = row().w_full().grow(1.0).min_h(0.0).child(rail).child(sidebar).child(divider).child(pane);
@@ -375,6 +380,28 @@ mod tests {
         rt.pointer_up(900.0, 650.0);
         rt.frame(0.0);
         assert!(rt.state.search.text.is_empty());
+    }
+
+    #[test]
+    fn conversation_controls_fit_supported_sizes() {
+        for dark in [false, true] {
+            for (width, height) in [(640.0, 400.0), (1000.0, 680.0), (1280.0, 800.0)] {
+                let mut s = init();
+                demo(&mut s);
+                let mut rt = rune::Runtime::new(s, view, (width, height), rune::Env::new(dark, 1.0));
+                for _ in 0..60 { rt.frame(1.0 / 60.0); }
+                let elements = rt.elements();
+                for key in ["search", "sign-out", "conversation-header", "draft", "editor", "send"] {
+                    let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
+                    let [x, y, w, h] = e.rect;
+                    assert!(w > 0.0 && h > 0.0 && x >= 0.0 && y >= 0.0 && x + w <= width + 1.0 && y + h <= height + 1.0,
+                        "{key} must fit {width}x{height}: {:?}", e.rect);
+                }
+                let header = elements.iter().find(|e| e.key.as_deref() == Some("conversation-header")).unwrap();
+                let draft = elements.iter().find(|e| e.key.as_deref() == Some("draft")).unwrap();
+                assert!(draft.rect[1] > header.rect[1] + header.rect[3]);
+            }
+        }
     }
 
     #[test]

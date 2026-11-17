@@ -145,7 +145,7 @@ fn init() -> State {
         preview_rows: Default::default(),
         #[cfg(feature = "image")]
         preview_viewport: Live::new([0.0; 4]),
-        panel_width: PANEL_MAX,
+        panel_width: 320.0,
         theme: None,
         viewer: None,
         reply_target: None,
