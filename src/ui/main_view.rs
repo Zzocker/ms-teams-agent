@@ -4,6 +4,8 @@ use crate::*;
 
 pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     let t = tok::theme(dark());
+    static ATTACH: rune::Icon = rune::Icon { name: "composer-attach", view: 24.0, body: r#"<path d="m8 12 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l9-9 M6 14l8-8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"# };
+    static SEND: rune::Icon = rune::Icon { name: "composer-send", view: 24.0, body: r#"<path d="m3 3 18 9-18 9 3-9z M6 12h15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"# };
     let brand = rune::oklch(if dark() { 0.76 } else { 0.49 }, 0.16, 285.0);
     let selected = rune::oklch(if dark() { 0.32 } else { 0.95 }, 0.035, 285.0);
     let sent = rune::oklch(if dark() { 0.38 } else { 0.9 }, 0.065, 285.0);
@@ -318,8 +320,8 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                         .child(el().key("edit-cancel").role("button").label("Cancel edit").focusable(true).cursor(rune::Cursor::Pointer)
                             .on_press(|s: &mut State| { s.editing = None; s.draft.clear(); })
                             .child(text("Cancel").font(type_::LABEL).color(tok::accent(0, dark()))))))
-                    .child(row().w_full().flex_wrap().gap(8.0).items_end()
-                        .child(col().grow(1.0).shrink().min_w(140.0).gap(8.0).px(16.0).py(14.0).radius(6.0).fill(t.card).border(1.0, t.text_secondary).border_sides([0.0, 0.0, 2.0, 0.0], brand)
+                    .child(col().key("composer").w_full().radius(12.0).fill(t.card).border(1.0, t.separator)
+                        .child(col().w_full().min_w(0.0).gap(8.0).px(16.0).pt(14.0).pb(10.0)
                             .children((!s.editor).then(|| crate::attachments::draft_files(s)).flatten())
                             .children((!s.pasted.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0)
                                 .children(s.pasted.iter().enumerate().map(|(i, (_, image))| pasted_image(image, i)))))
@@ -335,12 +337,24 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                                     .on_submit(|s: &mut State, _| if in_code_block(&s.draft.text[..s.draft.range().0]) { s.draft.insert("\n") } else { send(s) })), 1, 6)
                             })
                             .children(composer_preview(s)))
-                        .child(button("editor", "Editor", false, |s| s.editor = true))
-                        .children(s.editing.is_none().then(|| el().key("attach-file").role("button").label("Attach file from this device").focusable(true)
-                            .cursor(rune::Cursor::Pointer).px(12.0).py(8.0).radius(8.0).fill(t.control_off).hover(t.hover)
-                            .on_press_tx(crate::attachments::pick_file)
-                            .child(text("📎 Attach file").font(type_::LABEL).color(t.text))))
-                        .child(button("send", if s.sender.is_pending() { "Sending…" } else { "Send" }, true, send).fill(selected)))))
+                        .child(row().key("composer-toolbar").w_full().flex_wrap().gap(4.0).items_center().px(8.0).pb(8.0)
+                            .child(el().key("editor").role("button").label("Open message editor").focusable(true)
+                                .cursor(rune::Cursor::Pointer).px(10.0).py(7.0).radius(6.0).hover(t.hover)
+                                .on_press(|s: &mut State| s.editor = true)
+                                .child(text("Editor").font(type_::LABEL).color(t.text_secondary)))
+                            .children(s.editing.is_none().then(|| el().key("attach-file").role("button").label("Attach file from this device").focusable(true)
+                                .cursor(rune::Cursor::Pointer).px(10.0).py(7.0).radius(6.0).hover(t.hover)
+                                .on_press_tx(crate::attachments::pick_file)
+                                .child(row().gap(6.0).items_center()
+                                    .child(rune::icon(&ATTACH, 18.0).color(t.text_secondary))
+                                    .child(text("Attach file").font(type_::LABEL).color(t.text_secondary)))))
+                            .child(el().grow(1.0))
+                            .child(el().key("send").role("button").label(if s.sender.is_pending() { "Sending…" } else { "Send" }).focusable(true)
+                                .cursor(rune::Cursor::Pointer).px(12.0).py(7.0).radius(7.0).fill(brand)
+                                .on_press(send)
+                                .child(row().gap(6.0).items_center()
+                                    .child(text(if s.sender.is_pending() { "Sending…" } else { "Send" }).font(type_::LABEL).color(t.bg))
+                                    .child(rune::icon(&SEND, 18.0).color(t.bg))))))))
         }
     };
     let body = row().w_full().grow(1.0).min_h(0.0).child(rail).child(sidebar).child(divider).child(pane);
@@ -511,7 +525,7 @@ mod tests {
                 let search = elements.iter().find(|e| e.key.as_deref() == Some("search-box")).unwrap();
                 assert!((search.rect[0] + search.rect[2] / 2.0 - width / 2.0).abs() < 1.0,
                     "search must be centered at width {width}: {:?}", search.rect);
-                for key in ["search", "sign-out", "conversation-header", "draft", "editor", "send"] {
+                for key in ["search", "sign-out", "conversation-header", "composer", "draft", "editor", "attach-file", "send"] {
                     let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
                     let [x, y, w, h] = e.rect;
                     assert!(w > 0.0 && h > 0.0 && x >= 0.0 && y >= 0.0 && x + w <= width + 1.0 && y + h <= height + 1.0,

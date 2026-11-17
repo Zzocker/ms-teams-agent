@@ -261,6 +261,8 @@ pub(super) fn rich(html: &str, fences: bool) -> (String, Vec<(Range<usize>, Stri
             }
         }
         rest = &rest[i + j + 1..];
+        // Teams formats Shift+Enter as <br> followed by a source newline, not a second break.
+        if tag == "br" { rest = rest.trim_start_matches(['\r', '\n']); }
     }
     if !rest.contains('<') {
         out.push_str(&decode(rest));
@@ -354,6 +356,18 @@ mod tests {
         assert_eq!(links, text_links(text));
         let reply = format!("{raw}{html}");
         assert_eq!(reply_content(&reply).1.1.len(), 1);
+    }
+
+    #[test]
+    fn shift_enter_source_newlines_do_not_double_line_breaks() {
+        for raw in ["Hello<br>\r\nBye", "<p>Hello<br>\r\nBye</p>", "Hello<br>\nBye"] {
+            assert_eq!(html_to_text(raw), "Hello\nBye");
+            assert_eq!(html_to_rich(raw).0, "Hello\nBye");
+        }
+        let (text, links) = html_to_rich("Hello<br>\r\n<a href=\"https://example.com\">Bye</a>");
+        assert_eq!(text, "Hello\nBye");
+        assert_eq!(links, vec![(6..9, "https://example.com".into())]);
+        assert_eq!(html_to_text("<pre>a<br>\r\n<br>\r\nb</pre>"), "a\n\nb");
     }
 
     #[test]
