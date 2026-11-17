@@ -4,7 +4,7 @@ use crate::*;
 
 pub(crate) fn demo(s: &mut State) {
     let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), channel: false, title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b", latest: None };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), reactions: vec![], mentions: vec![] };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: vec![] };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
@@ -64,6 +64,19 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
     ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
     ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
     ("main", demo),
+    ("message-states", message_states_demo),
+    ("message-deleted", |s| { message_states_demo(s); if let Some(Ok(page)) = &mut s.messages { message_state::tombstone(&mut page.msgs[1]); } }),
+    ("message-restored", |s| {
+        message_states_demo(s);
+        if let Some(Ok(page)) = &mut s.messages { page.msgs[1].edited = false; }
+    }),
+    ("message-sending", |s| { message_states_demo(s); if let Some(Ok(page)) = &mut s.messages { page.msgs[1].server_id.clear(); page.msgs[1].edited = false; } }),
+    ("message-restore-error", |s| {
+        message_states_demo(s);
+        if let Some(Ok(page)) = &mut s.messages { message_state::tombstone(&mut page.msgs[1]); }
+        s.send_error = Some("Could not restore message: chat service 403 Forbidden".into());
+    }),
+
     ("updates", |s| { demo(s); s.release_panel = true; }),
     ("updates-current", |s| {
         demo(s); s.release_panel = true;
@@ -170,3 +183,15 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
         (s.selected, s.messages) = (None, None);
     }),
 ];
+
+/// Synthetic service-shaped data; no account, credentials, or network.
+pub(crate) fn message_states_demo(s: &mut State) {
+    demo(s);
+    s.messages = Some(Ok(Page { older: None, msgs: teams::parse_messages(&serde_json::json!({"messages":[
+        {"id":"100", "clientmessageid":"sample-incoming", "from":"8:orgid:charles", "imdisplayname":"Charles Babbage", "composetime":"2026-11-17T10:20:00Z", "messagetype":"Text", "content":"The design review is now at 3 PM.", "properties":{"edittime":"1790000000000"}},
+        {"id":"101", "clientmessageid":"sample-outgoing", "from":"8:orgid:me", "imdisplayname":"Ada Lovelace", "composetime":"2026-11-17T10:24:00Z", "messagetype":"Text", "content":"Thanks, I updated the notes. See you there!", "properties":{"edittime":"1790000001000"}}
+    ]}), "me") }));
+    s.message_state.receipt_chat = Some("a".into());
+    s.message_state.seen.insert("charles".into(), 101);
+    s.message_state.typing("a".into(), "charles".into(), "Charles Babbage".into(), true);
+}

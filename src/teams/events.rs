@@ -12,6 +12,7 @@ pub enum Update {
     Connected(Vec<Chat>),
     Message { chat: Chat, message: Option<Msg>, server_id: String, new: bool },
     Status(Option<String>),
+    Typing { chat: String, user: String, name: String, active: bool },
 }
 
 /// Stop at sign-out, even if an old connection completes after a new account signs in.
@@ -204,11 +205,17 @@ fn message_update(event: &Value, me: &User) -> Option<Update> {
     let new = match event["resourceType"].as_str()? { "NewMessage" => true, "MessageUpdate" => false, _ => return None };
     let r = &event["resource"];
     let kind = r["messagetype"].as_str()?;
-    if kind != "Text" && !kind.starts_with("RichText") { return None; }
+
     let link = r["conversationLink"].as_str()?;
     let id = link.split("/conversations/").nth(1)?.split('/').next()?;
     // The service supplies percent-encoded conversation links.
     let id = percent_decode(id)?;
+    if matches!(kind, "Control/Typing" | "Control/ClearTyping") {
+        let user = avatar_id(r["from"].as_str()?);
+        if user.is_empty() || user == me.id { return None; }
+        return Some(Update::Typing { chat: id, user, name: r["imdisplayname"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("Someone").into(), active: kind == "Control/Typing" });
+    }
+    if kind != "Text" && !kind.starts_with("RichText") { return None; }
     let wrapper = serde_json::json!({"conversations":[{"id":id,"lastMessage":r,
         "threadProperties": r.get("threadProperties").or_else(|| r.get("properties"))}]});
     let mut chat = parse_conversations(&wrapper, me).pop()?;
@@ -254,7 +261,7 @@ mod tests {
         }
     }
     #[test]
-    fn parses_messages_edits_and_deletions_but_not_typing() {
+    fn parses_messages_edits_deletions_and_typing() {
         let mut event = serde_json::json!({"resourceType":"NewMessage", "resource":{
             "id":"123", "clientmessageid":"456", "conversationLink":"https://service/v1/users/ME/conversations/19%3Achat%40thread.v2",
             "messagetype":"Text", "content":"Hello", "from":"8:orgid:other", "composetime":"2026-11-15T00:00:00Z"
@@ -267,7 +274,10 @@ mod tests {
         event["resource"]["content"] = "".into();
         assert!(matches!(message_update(&event, &User::default()), Some(Update::Message { new:false, message:None, .. })));
         event["resource"]["messagetype"] = "Control/Typing".into();
-        assert!(message_update(&event, &User::default()).is_none());
+        assert!(matches!(message_update(&event, &User::default()), Some(Update::Typing { active: true, .. })));
+        event["resource"]["messagetype"] = "Control/ClearTyping".into();
+        assert!(matches!(message_update(&event, &User::default()), Some(Update::Typing { active: false, .. })));
+        assert!(message_update(&event, &User { id: "other".into(), ..Default::default() }).is_none());
         assert_eq!(percent_decode("bad%GG"), None);
     }
     #[test]

@@ -129,26 +129,30 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
         .filter(|m| matches!(m["messagetype"].as_str(), Some(t) if t == "Text" || t.starts_with("RichText")))
         .filter_map(|m| {
             let raw = m["content"].as_str().unwrap_or("");
-            if raw.is_empty() {
+            let deleted = [ &m["deletetime"], &m["properties"]["deletetime"], &m["properties"]["deletionTime"] ].into_iter().any(super::message_flag);
+            if raw.is_empty() && !deleted {
                 return None; // deleted
             }
+            let raw = if deleted { "" } else { raw };
             let (reply, (text, mut links)) = reply_content(raw);
-            let mentions = parsed_mentions(m, &mut links);
-            let images = images(m, raw);
-            let files = files(m);
+            let mentions = if deleted { vec![] } else { parsed_mentions(m, &mut links) };
+            let images = if deleted { vec![] } else { images(m, raw) };
+            let files = if deleted { vec![] } else { files(m) };
             Some(Msg {
                 id: m["clientmessageid"].as_str().or(m["id"].as_str()).unwrap_or("").into(),
                 server_id: m["id"].as_str().unwrap_or("").into(),
                 sender: m["imdisplayname"].as_str().unwrap_or("").into(),
                 sender_id: avatar_id(m["from"].as_str().unwrap_or("")),
-                text: if text.is_empty() && reply.is_none() && images.is_empty() && files.is_empty() { "[attachment]".into() } else { text },
+                deleted,
+                edited: !deleted && (super::message_flag(&m["properties"]["edittime"]) || super::message_flag(&m["skypeeditedid"])),
+                text: if deleted { "This message was deleted.".into() } else if text.is_empty() && reply.is_none() && images.is_empty() && files.is_empty() { "[attachment]".into() } else { text },
                 time: m["composetime"].as_str().unwrap_or("").into(),
                 mine: !me.is_empty() && m["from"].as_str().unwrap_or("").ends_with(me),
                 reply,
                 images,
                 links,
                 files,
-                raw: raw.into(), mentions, reactions: parse_reactions(&m["properties"]),
+                raw: raw.into(), mentions, reactions: if deleted { vec![] } else { parse_reactions(&m["properties"]) },
             })
         })
         .collect();

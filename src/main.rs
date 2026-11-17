@@ -12,6 +12,7 @@ mod images;
 mod markdown;
 mod teams;
 mod notifications;
+mod message_state;
 mod releases;
 mod ui;
 
@@ -38,6 +39,7 @@ enum Screen {
 type Messages = Result<Page, String>;
 
 struct State {
+    message_state: message_state::MessageState,
     release_loader: Latest<Result<Option<releases::Release>, String>>,
     release_status: releases::Status,
     release_panel: bool,
@@ -119,8 +121,8 @@ struct State {
     hovered_bar: Option<String>,
     /// The message waiting for the user to confirm its deletion.
     deleting: Option<Msg>,
-    /// A delete in flight: the chat, the message's id, and how it went.
-    deleter: Latest<(String, String, Result<(), String>)>,
+    /// A delete in flight: the chat, the original message, and how it went.
+    deleter: Latest<(String, Msg, Result<(), String>)>,
     reactor: Latest<(String, String, String, bool, Result<(), String>)>,
     send_error: Option<String>,
     /// Filters the chat list by name.
@@ -132,6 +134,7 @@ struct State {
 
 fn init() -> State {
     State {
+        message_state: Default::default(),
         release_loader: Latest::default(),
         release_status: releases::Status::Idle,
         release_panel: false,
@@ -145,7 +148,7 @@ fn init() -> State {
         preview_rows: Default::default(),
         #[cfg(feature = "image")]
         preview_viewport: Live::new([0.0; 4]),
-        panel_width: PANEL_MAX,
+        panel_width: 320.0,
         theme: None,
         viewer: None,
         reply_target: None,
@@ -205,6 +208,8 @@ fn init() -> State {
 }
 
 fn setup(s: &mut State, waker: Waker) {
+    s.message_state.receipts.set_waker(waker.clone());
+    s.message_state.restorer.set_waker(waker.clone());
     s.teams_loader.set_waker(waker.clone());
     s.loader.set_waker(waker.clone());
     s.prefetch.set_waker(waker.clone());
@@ -322,11 +327,14 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             }
         }
     }
-    if let Some((id, msg_id, r)) = s.deleter.take() {
+    if let Some((id, deleted, r)) = s.deleter.take() {
         history::invalidate(s, &id);
         match r {
             Ok(()) => if let (true, Some(Ok(page))) = (s.selected.as_ref() == Some(&id), &mut s.messages) {
-                page.msgs.retain(|m| m.id != msg_id);
+                let mut deleted = deleted;
+                message_state::tombstone(&mut deleted);
+                let server_id = deleted.server_id.clone();
+                notifications::apply_message(page, &server_id, Some(deleted));
                 s.loader.cancel();
             },
             Err(e) => s.send_error = Some(format!("Not deleted: {e}")),
@@ -396,6 +404,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
+    changed |= message_state::poll(s, tx);
     history::poll(s);
     if !cfg!(test) && std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {
         let ids = std::iter::once(session.user.id.clone())
