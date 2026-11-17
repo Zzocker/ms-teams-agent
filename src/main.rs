@@ -413,6 +413,23 @@ fn dark() -> bool {
     DARK.with(|d| d.get())
 }
 
+fn rest(s: &mut State, _: &mut Tx) -> bool {
+    #[cfg(feature = "image")]
+    {
+        let urls = nearby_previews(s).chain(s.viewer.iter().cloned())
+            .chain(s.viewer.iter().map(|u| images::full(u))).collect();
+        s.images.retain(&urls, s.sender.is_pending());
+    }
+    let _ = s;
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" { fn malloc_trim(pad: usize) -> std::ffi::c_int; }
+        // glibc can retain freed image/layout pages after Rune has cleaned up its idle caches.
+        unsafe { malloc_trim(0); }
+    }
+    false
+}
+
 fn view(s: &State, cx: &mut Cx<State>) -> El {
     DARK.with(|d| d.set(s.theme.unwrap_or_else(|| cx.system_dark())));
     let t = tok::theme(dark());
@@ -460,7 +477,7 @@ fn main() {
         min_size: Some((640.0, 400.0)),
         families: ("Inter", "ui-monospace"),
         ..AppSpec::new("Teams", (1000.0, 680.0), init, view)
-    }).on_focus(notifications::focus).on_visibility(notifications::visibility)
+    }).on_focus(notifications::focus).on_visibility(notifications::visibility).on_rest(rest)
         .on_close(|s, _| { s.window_visible = false; s.window_focused = false; })
         .on_quit(|s, _| { s.attempt.fetch_add(1, SeqCst); });
     let handle = app.handle();

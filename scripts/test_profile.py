@@ -20,7 +20,7 @@ class ProfileTests(unittest.TestCase):
             actions = (work / 'src/actions.rs').read_text()
             for name in ('send', 'delete_message', 'sign_out'):
                 self.assertIn(f'fn {name}(s: &mut State) {{\n    return;', actions)
-            self.assertIn('page: &Page) -> Result<(), String> {\n    return Ok(());',
+            self.assertIn('horizon: &ReadHorizon) -> Result<(), String> {\n    return Ok(());',
                           (work / 'src/teams.rs').read_text())
             self.assertIn('static PROFILE_ALLOCATOR', (work / 'src/main.rs').read_text())
             self.assertIn('!PROFILE_CLEARED.load(SeqCst)', (work / 'src/main.rs').read_text())

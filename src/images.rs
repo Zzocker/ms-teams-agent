@@ -59,6 +59,11 @@ impl Images {
         self.images.retain(|url, _| !url.contains("/views/imgpsh_fullsize_anim") || open.as_deref() == Some(url.as_str()));
     }
 
+    /// At rest keep only the current viewport and viewer; disk-backed previews can load again.
+    pub fn retain(&mut self, urls: &std::collections::HashSet<String>, sending: bool) {
+        self.images.retain(|url, _| urls.contains(url) || sending && url.starts_with("local:"));
+    }
+
     pub fn insert(&mut self, url: String, image: Option<Image>) {
         self.clock.set(self.clock.get() + 1);
         self.images.insert(url, Entry { image, used: Cell::new(self.clock.get()) });
@@ -163,6 +168,79 @@ fn trim(dir: &Path, budget: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_cleanup_keeps_visible_previews_viewer_and_unsent_images() {
+        let mut s = crate::init();
+        crate::demo(&mut s);
+        let cache = ImageCache::new(std::sync::Arc::new(|| {}));
+        let image = cache.rgba(4, 4, vec![127; 64]);
+        for url in ["visible", "offscreen", "local:pending:0", "https://example.com/views/imgo", "https://example.com/views/imgpsh_fullsize_anim"] {
+            s.images.insert(url.into(), Some(image.clone()));
+        }
+        let message = &mut s.messages.as_mut().unwrap().as_mut().unwrap().msgs[0];
+        message.images = vec!["visible".into()];
+        s.preview_rows.insert(message.id.clone(), [0.0, 0.0, 500.0, 200.0]);
+        s.preview_viewport.set([0.0, 0.0, 500.0, 500.0]);
+        s.viewer = Some("https://example.com/views/imgo".into());
+        s.images.retain(&["visible".to_owned()].into(), true);
+        assert!(s.images.get("local:pending:0").is_some());
+        for url in ["https://example.com/views/imgo", "https://example.com/views/imgpsh_fullsize_anim", "offscreen"] {
+            s.images.insert(url.into(), Some(image.clone()));
+        }
+        assert!(!crate::rest(&mut s, &mut crate::Tx::default()));
+        assert!(s.images.get("visible").is_some());
+        assert!(s.images.get("https://example.com/views/imgpsh_fullsize_anim").is_some());
+        assert!(s.images.get("https://example.com/views/imgo").is_some());
+        assert!(s.images.get("offscreen").is_none());
+        assert!(s.images.get("local:pending:0").is_none());
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    #[ignore = "Linux/glibc RSS experiment; run alone with --ignored --test-threads=1"]
+    fn idle_cleanup_returns_decoded_image_pages_to_linux() {
+        let rss = || -> u64 {
+            std::fs::read_to_string("/proc/self/status").unwrap().lines().find_map(|l| l.strip_prefix("VmRSS:")
+                .and_then(|s| s.split_whitespace().next()).and_then(|s| s.parse().ok())).unwrap()
+        };
+        let mut s = crate::init();
+        crate::demo(&mut s);
+        let cache = ImageCache::new(std::sync::Arc::new(|| {}));
+        let baseline = rss();
+        for i in 0..4096u32 {
+            let mut pixels = vec![127u8; 64 * 64 * 4];
+            pixels[..4].copy_from_slice(&i.to_le_bytes());
+            let image = cache.rgba(64, 64, pixels);
+            image.wait().unwrap();
+            s.images.insert(format!("image{i}"), Some(image));
+        }
+        let loaded = rss();
+        let cached = s.images.images.len();
+        assert!(s.images.images.values().map(|e| cost(&e.image)).sum::<u64>() <= BUDGET);
+        // Keep one visible image while the other cached previews become unused.
+        let message = &mut s.messages.as_mut().unwrap().as_mut().unwrap().msgs[0];
+        message.images = vec!["image4095".into()];
+        s.preview_rows.insert(message.id.clone(), [0.0, 0.0, 500.0, 200.0]);
+        s.preview_viewport.set([0.0, 0.0, 500.0, 500.0]);
+        assert!(!crate::rest(&mut s, &mut crate::Tx::default()));
+        let rested = rss();
+        assert_eq!(s.images.images.len(), 1);
+        assert!(s.images.get("image4095").flatten().is_some());
+        assert!(rested + 16 * 1024 < loaded, "RSS should fall by at least 16 MiB: {loaded} -> {rested} KiB");
+        let result = serde_json::json!({"baseline_kib":baseline,"before_rest_kib":loaded,"after_rest_kib":rested,
+            "cached_images_before":cached,"cached_images_after":1,"generated_images":4096,"visible_image_preserved":true});
+        eprintln!("IDLE_MEMORY_PROOF {result}");
+        if let Ok(path) = std::env::var("IDLE_MEMORY_EVIDENCE") {
+            std::fs::write(format!("{path}.json"), serde_json::to_string_pretty(&result).unwrap()).unwrap();
+            let report = format!("Synthetic idle-memory regression (Linux/glibc)\n\n4096 decoded test images, no Teams account or network\nBefore idle cleanup: {:.1} MiB RSS / {cached} cached previews\nAfter idle cleanup: {:.1} MiB RSS / 1 visible preview retained\nReleased: {:.1} MiB RSS\n\nPASS: visible image preserved; unused previews released", loaded as f64 / 1024.0, rested as f64 / 1024.0, (loaded - rested) as f64 / 1024.0);
+            let page = s.messages.as_mut().unwrap().as_mut().unwrap();
+            page.msgs.truncate(1); page.msgs[0].text = report;
+            rune::App::new(crate::AppSpec::new("Idle memory regression", (1200.0, 800.0), crate::init, crate::view))
+                .init(move || s).args(["--snap".into(), path, "--scale".into(), "1".into()]).run();
+        }
+    }
+
 
     #[test]
     fn evicts_least_recently_shown_first() {
