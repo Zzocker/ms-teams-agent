@@ -90,6 +90,15 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
             page.msgs[1].text = "Well done".into();
         }
     }),
+    ("copy-link", |s| {
+        demo(s);
+        if let Some(Ok(page)) = &mut s.messages {
+            page.msgs.truncate(1);
+            let (text, links) = teams::html_to_rich(r#"<p>Test data: café 🧪<br>Spec: <a href="https://example.com/specification?version=14&amp;mode=test">https://example.com/spec...</a><br>Notes: <a href="https://example.org/notes/full-document">https://example.org/notes…</a><br>Named link: <a href="https://example.net/guide">Read the guide</a><br>Literal dots: wait...</p>"#);
+            (page.msgs[0].text, page.msgs[0].links) = (text, links);
+            s.menu = Some(page.msgs[0].id.clone());
+        }
+    }),
     ("link", |s| {
         demo(s);
         if let Some(Ok(page)) = &mut s.messages {
