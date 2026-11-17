@@ -164,7 +164,7 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
     msgs
 }
 
-/// Pictures pasted into the message body, then image files' previews, as [`ams_preview`] URLs.
+/// Teams picture previews and public Giphy animations embedded in the message body.
 pub(super) fn images(m: &Value, raw: &str) -> Vec<String> {
     let inline = raw.split("<img").skip(1).filter_map(|tag| {
         let tag = tag.split('>').next()?;
@@ -172,7 +172,15 @@ pub(super) fn images(m: &Value, raw: &str) -> Vec<String> {
     });
     let files: Vec<Value> = m["properties"]["files"].as_str().and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default();
     let previews = files.iter().filter_map(|f| f["filePreview"]["previewUrl"].as_str());
-    inline.chain(previews).filter_map(ams_preview).collect()
+    let giphy = raw.split("<img").skip(1).filter_map(|tag| {
+        let tag = tag.split('>').next()?;
+        if !tag.contains("schema.skype.com/Giphy") { return None; }
+        let tail = tag.split_once("src=")?.1;
+        let quote = tail.chars().next()?;
+        if !matches!(quote, '\'' | '"') { return None; }
+        giphy_image(tail[1..].split(quote).next()?)
+    });
+    inline.chain(previews).filter_map(ams_preview).chain(giphy).collect()
 }
 
 /// Shared files without a media-store picture, once each (Teams can repeat an entry dozens of times).
@@ -203,6 +211,21 @@ mod tests {
     use serde_json::json;
 
     const ME: &str = "8:orgid:me-oid";
+
+    #[test]
+    fn giphy_messages_render_as_images_instead_of_attachment_placeholders() {
+        let url = "https://media0.giphy.com/media/v1.example/pl8L3FwRCX5L2akQj8/giphy.gif";
+        for quote in ['\'', '"'] {
+            let raw = format!("<p><img alt={quote}Good Morning Dog GIF{quote} src={quote}{url}{quote} itemtype={quote}http://schema.skype.com/Giphy{quote} width={quote}900{quote} height={quote}900{quote}></p>");
+            let messages = parse_messages(&json!({"messages":[{"id":"101", "messagetype":"RichText/Html", "content":raw}]}), "me");
+            assert_eq!(messages[0].images, [url]);
+            assert!(messages[0].text.is_empty());
+        }
+        assert_eq!(giphy_image(url).as_deref(), Some(url));
+        for bad in ["http://media0.giphy.com/media/example.gif", "https://media0.giphy.com.evil.test/media/example.gif", "https://media0.giphy.com@evil.test/media/example.gif", "https://example.com/media/example.gif", "https://media0.giphy.com/media/example.html"] {
+            assert!(giphy_image(bad).is_none());
+        }
+    }
 
     #[test]
     fn bot_avatar_identity_is_preserved() {

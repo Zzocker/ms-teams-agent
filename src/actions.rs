@@ -209,7 +209,7 @@ pub(crate) fn send(s: &mut State) {
         }
     } else if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: mentions.clone() });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), sender_id: q.sender_id.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: mentions.clone() });
     }
     let draft = s.draft.clone();
     s.draft.clear();
@@ -279,9 +279,13 @@ pub(crate) fn start_edit(s: &mut State, m: &Msg) {
 
 /// Quotes `m` above the box, so the next send replies to it.
 pub(crate) fn start_reply(s: &mut State, m: &Msg) {
+    let mut m = m.clone();
+    if m.mine && let Screen::Main { session, .. } = &s.screen {
+        m.sender = if session.user.name.is_empty() { "You".into() } else { session.user.name.clone() };
+    }
     // A reply is a new message: an edit's text isn't its draft.
     if s.editing.take().is_some() { s.draft.clear(); }
-    (s.replying, s.menu) = (Some(m.clone()), None);
+    (s.replying, s.menu) = (Some(m), None);
     s.send_error = None;
 }
 
@@ -299,6 +303,29 @@ pub(crate) fn delete_message(s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_quote_uses_account_name_and_preserves_sender_identity() {
+        let mut s = init();
+        message_states_demo(&mut s);
+        let mut original = s.messages.as_ref().unwrap().as_ref().unwrap().msgs[1].clone();
+        original.sender = "Display Name".into();
+        start_reply(&mut s, &original);
+        let Screen::Main { session, .. } = &s.screen else { panic!() };
+        assert_eq!(s.replying.as_ref().unwrap().sender, session.user.name);
+        // Existing server quotes can also contain the placeholder.
+        let raw = r#"<blockquote itemtype="http://schema.skype.com/Reply" itemid="101"><strong itemprop="mri" itemid="8:orgid:me">Display Name</strong><p itemprop="preview">Original</p></blockquote><p>A reply</p>"#;
+        let mut page = teams::parse_messages(&serde_json::json!({"messages":[{
+            "id":"102", "messagetype":"RichText/Html", "from":"8:orgid:me", "content":raw
+        }]}), "me");
+        assert_eq!(page[0].reply.as_ref().unwrap().sender_id, original.sender_id);
+        s.messages.as_mut().unwrap().as_mut().unwrap().msgs = std::mem::take(&mut page);
+        let mut rt = rune::Runtime::new(s, view, (1200.0, 800.0), rune::Env::new(true, 1.0));
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        assert!(!rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("Display Name"))));
+        start_reply(&mut rt.state, &Msg { mine: false, sender: "Other Person".into(), ..original });
+        assert_eq!(rt.state.replying.as_ref().unwrap().sender, "Other Person");
+    }
 
     #[test]
     fn reply_navigation_resolves_server_ids_and_handles_missing_messages() {

@@ -36,6 +36,7 @@ pub struct Images {
 struct Entry {
     image: Option<Image>,
     used: Cell<u64>,
+    bytes: u64,
 }
 
 /// Decoded RGBA bytes, plus the third more Rune's mip chain takes; a failure holds none.
@@ -66,17 +67,19 @@ impl Images {
 
     pub fn insert(&mut self, url: String, image: Option<Image>) {
         self.clock.set(self.clock.get() + 1);
-        self.images.insert(url, Entry { image, used: Cell::new(self.clock.get()) });
+        // Sprite decoding accepts at most 240 frames; reserve that bound, including mips.
+        let bytes = cost(&image) * if crate::teams::emoji_animation(&url).is_some() { 240 } else { 1 };
+        self.images.insert(url, Entry { image, used: Cell::new(self.clock.get()), bytes });
         self.evict(BUDGET);
     }
 
     /// Drop the least recently used pictures until their pixels fit in `budget`.
     fn evict(&mut self, budget: u64) {
-        let mut total: u64 = self.images.values().map(|e| cost(&e.image)).sum();
+        let mut total: u64 = self.images.values().map(|e| e.bytes).sum();
         while total > budget {
             let Some(oldest) = self.images.iter().filter(|(_, e)| e.image.is_some())
                 .min_by_key(|(_, e)| e.used.get()).map(|(url, _)| url.clone()) else { break };
-            total -= self.images.remove(&oldest).map_or(0, |e| cost(&e.image));
+            total -= self.images.remove(&oldest).map_or(0, |e| e.bytes);
         }
     }
 
@@ -106,6 +109,15 @@ impl Images {
 }
 
 fn load(s: &Session, url: &str, cache: &ImageCache) -> Option<Image> {
+    let emoji = crate::teams::emoji_animation(url).as_deref() == Some(url);
+    if emoji || crate::teams::giphy_image(url).is_some() {
+        let mut res = agent().get(url).call().ok()?;
+        if !res.status().is_success() { return None; }
+        let bytes = res.body_mut().with_config().limit(MAX_BYTES).read_to_vec().ok()?;
+        let image = cache.load(if emoji { emoji_frames(&bytes)? } else { bytes });
+        image.wait().ok()?;
+        return Some(image);
+    }
     // The URL carries no secret but the request does: each token goes only to the hosts it's for.
     let auth = if let Some(host) = crate::teams::thumbnail_host(url) {
         format!("Bearer {}", crate::auth::sharepoint_access(host).ok()?)
@@ -142,6 +154,35 @@ fn load(s: &Session, url: &str, cache: &ImageCache) -> Option<Image> {
     Some(image)
 }
 
+/// Turn Teams' vertical strip into APNG so Rune schedules frames only while it is drawn.
+fn emoji_frames(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(100);
+    limits.max_image_height = Some(24_000);
+    limits.max_alloc = Some(16 * 1024 * 1024);
+    reader.limits(limits);
+    let strip = reader.decode().ok()?.to_rgba8();
+    let (w, h) = strip.dimensions();
+    if w != 100 || h == 0 || h % w != 0 || h / w > 240 { return None; }
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, w, w);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        if h > w {
+            encoder.set_animated(h / w, 0).ok()?;
+            encoder.set_frame_delay(1, 24).ok()?;
+        }
+        let mut writer = encoder.write_header().ok()?;
+        for frame in strip.as_raw().chunks_exact((w * w * 4) as usize) {
+            writer.write_image_data(frame).ok()?;
+        }
+        writer.finish().ok()?;
+    }
+    Some(bytes)
+}
+
 /// `{object id}.{view}`, or `None` if either part could step outside the cache directory.
 fn file_name(url: &str) -> Option<String> {
     let (id, view) = url.split_once("/v1/objects/")?.1.split_once("/views/")?;
@@ -168,6 +209,49 @@ fn trim(dir: &Path, budget: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emoji_sprite_becomes_a_looping_animation_with_distinct_frames() {
+        use image::AnimationDecoder;
+        let mut strip = image::RgbaImage::new(100, 200);
+        for (x, y, pixel) in strip.enumerate_pixels_mut() {
+            *pixel = image::Rgba([x as u8, y as u8, 127, 255]);
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        strip.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        if let Ok(path) = std::env::var("EMOJI_SPRITE_EVIDENCE") {
+            png = std::io::Cursor::new(std::fs::read(path).unwrap());
+        }
+        let bytes = emoji_frames(png.get_ref()).unwrap();
+        let decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(&bytes)).unwrap().apng().unwrap();
+        assert!(matches!(decoder.loop_count(), image::metadata::LoopCount::Infinite));
+        let frames = decoder.into_frames().collect_frames().unwrap();
+        assert!(frames.len() >= 2);
+        assert_eq!(frames[0].buffer().dimensions(), (100, 100));
+        assert!(frames.windows(2).any(|f| f[0].buffer() != f[1].buffer()));
+        assert_eq!(frames[0].delay(), image::Delay::from_numer_denom_ms(1000, 24));
+        let cache = ImageCache::new(std::sync::Arc::new(|| {}));
+        let image = cache.load(bytes.clone());
+        assert_eq!(image.wait().unwrap(), [100, 100]);
+        if let Ok(path) = std::env::var("EMOJI_SCREENSHOT_EVIDENCE") {
+            std::fs::write(format!("{path}.apng"), bytes).unwrap();
+            let mut s = crate::init();
+            crate::demo(&mut s);
+            let emoji = r#"<span><img itemtype="http://schema.skype.com/Emoji" src="https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/muscle/default/100_f_s3.png" alt="💪🏼"></span>"#;
+            let raw = format!("<div>{emoji}{emoji}</div>");
+            let url = crate::teams::animated_emojis(&raw)[0].0.clone();
+            s.images.insert(url, Some(image));
+            s.messages = Some(Ok(crate::teams::Page { older: None, msgs: crate::teams::parse_messages(&serde_json::json!({"messages":[{
+                "id":"101", "messagetype":"RichText/Html", "from":"8:orgid:charles", "imdisplayname":"Charles Babbage", "content":raw, "composetime":"2026-11-17T12:00:00Z"
+            }]}), "me") }));
+            rune::App::new(rune::AppSpec::new("Animated emoji regression", (1200.0, 800.0), crate::init, crate::view))
+                .init(move || s).args(["--snap".into(), path, "--scale".into(), "1".into()]).run();
+        }
+        assert!(emoji_frames(b"not an image").is_none());
+        let mut invalid = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(100, 150).write_to(&mut invalid, image::ImageFormat::Png).unwrap();
+        assert!(emoji_frames(invalid.get_ref()).is_none());
+    }
 
     #[test]
     fn idle_cleanup_keeps_visible_previews_viewer_and_unsent_images() {

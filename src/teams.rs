@@ -82,7 +82,7 @@ pub struct Msg {
     pub edited: bool,
     pub deleted: bool,
     pub reply: Option<Reply>,
-    /// Preview URLs of the pictures it carries (pasted screenshots, image files), from [`ams_preview`].
+    /// Teams picture previews from [`ams_preview`] and public Giphy animation URLs.
     pub images: Vec<String>,
     /// Web links in `text`: byte ranges and their URLs, from [`html_to_rich`].
     pub links: Vec<(Range<usize>, String)>,
@@ -109,6 +109,7 @@ pub struct File {
 pub struct Reply {
     pub id: String,
     pub sender: String,
+    pub sender_id: String,
     pub time: String,
     pub text: String,
 }

@@ -169,9 +169,15 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 let new_day = prev.is_none_or(|p| day(&p.time) != day(&m.time));
                 // Nearby messages from one sender share an avatar, name and timestamp.
                 let head = prev.is_none_or(|p| !same_message_group(p, m));
-                let time = note(&message_time(&m.time, chrono::Local::now().date_naive())).font(type_::LABEL);
-                let bubble = col().max_w(720.0).shrink().min_w(0.0).px(12.0).py(10.0).radius(6.0)
-                    .fill(if m.mine { sent } else { t.card })
+                let time = message_time(&m.time, chrono::Local::now().date_naive());
+                let time = note(&format!("{time}{}", if m.edited { " · Edited" } else { "" }))
+                    .key(format!("time/{}", m.id)).font(type_::LABEL).wrap().shrink().min_w(0.0);
+                #[cfg(feature = "image")]
+                let emojis = teams::animated_emojis(&m.raw);
+                #[cfg(not(feature = "image"))]
+                let emojis: Vec<(String, String, u16)> = vec![];
+                let bubble = col().key(format!("bubble/{}", m.id)).max_w(720.0).shrink().min_w(0.0).px(12.0).py(10.0).radius(6.0)
+                    .fill(if !emojis.is_empty() && m.images.is_empty() && m.files.is_empty() { t.bg } else if m.mine { sent } else { t.card })
                     .border(2.0, tok::accent(0, dark()).alpha(if s.reply_highlight_on && s.reply_highlight.as_ref().is_some_and(|(id, _)| id == &m.id) { 1.0 } else { 0.0 }))
                     .children(m.reply.as_ref().map(|reply| {
                         let target = reply.id.clone();
@@ -188,22 +194,27 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             })
                             .child(el().w(2.0).radius(1.0).fill(t.text_secondary))
                             .child(col().gap(2.0).grow(1.0).shrink().min_w(0.0)
-                                .child(note(&format!("{}  {}", reply.sender, local_time(&reply.time, "%Y-%m-%d %I:%M %p"))).font(type_::LABEL).truncate())
+                                .child(note(&format!("{}  {}", if reply.sender_id == session.user.id { &session.user.name } else { &reply.sender }, local_time(&reply.time, "%Y-%m-%d %I:%M %p"))).font(type_::LABEL).truncate())
                                 .child(text(reply.text.as_str()).font(type_::BODY).color(t.text).max_lines(2)))
                     }))
-                    .children((!m.text.is_empty()).then(|| message_text(m)))
+                    .children((!m.text.is_empty() && emojis.is_empty()).then(|| message_text(m)))
                     .children((!m.images.is_empty()).then(|| row().w_full().flex_wrap().gap(8.0).mt(if m.text.is_empty() { 0.0 } else { 8.0 })
                         .children(m.images.iter().map(|url| message_image(s, url)))))
                     .children((!m.files.is_empty()).then(|| col().gap(8.0).mt(if m.text.is_empty() && m.images.is_empty() { 0.0 } else { 8.0 })
                         .children(m.files.iter().map(|f| file_card(s, f)))));
+                #[cfg(feature = "image")]
+                let bubble = bubble.children((!emojis.is_empty()).then(|| row().flex_wrap().gap(4.0)
+                    .children(emojis.iter().enumerate().map(|(i, (url, alt, size))| message_emoji(s, url, alt, *size).key(format!("emoji/{}/{i}", m.id))))));
                 // Keyed by id, not index: the 50-message window slides on a new message, and index keys would morph each bubble into its neighbour.
                 let hover_id = m.id.clone();
-                let line = row().key(format!("msg/{}", m.id)).hover_group_shared(format!("msg/{}", m.id)).arrives_whole()
+                let bubble = bubble.hover_group_shared(format!("msg/{}", m.id))
                     .on_hover_change(move |s: &mut State, on, _| {
                         if on { s.hovered = Some(hover_id.clone()) } else if s.hovered.as_ref() == Some(&hover_id) { s.hovered = None }
-                    }).w_full().gap(8.0).pt(if head { 12.0 } else { 0.0 });
+                    });
+                let line = row().key(format!("msg/{}", m.id)).arrives_whole()
+                    .w_full().gap(8.0).pt(if head { 12.0 } else { 0.0 });
                 #[cfg(feature = "image")]
-                let line = if !m.images.is_empty() || m.files.iter().any(|f| f.preview.is_some()) {
+                let line = if !m.images.is_empty() || !emojis.is_empty() || m.files.iter().any(|f| f.preview.is_some()) {
                     let id = m.id.clone();
                     line.on_drawn_layout_tx(move |s: &mut State, rect, tx| {
                         s.preview_rows.insert(id.clone(), rect);
@@ -217,7 +228,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 };
                 // Only a message the server has: an edit needs its id and HTML.
                 // Over the bubble's top-right corner while the message is hovered (or focused), as in Teams.
-                // The toolbar reaches above the row, so it shares the row's hover: the pointer on it
+                // The toolbar reaches above the bubble, so it shares the bubble's hover: the pointer on it
                 // keeps this message's actions, not the one above.
                 let shown = s.menu.as_ref() == Some(&m.id) || s.hovered_bar.as_ref().or(s.hovered.as_ref()) == Some(&m.id);
                 let bar_id = m.id.clone();
@@ -227,15 +238,17 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                             if on { s.hovered_bar = Some(bar_id.clone()) } else if s.hovered_bar.as_ref() == Some(&bar_id) { s.hovered_bar = None }
                         })
                         .child(a));
-                let bubble = bubble.children(message_reactions(s, m)).children(actions);
+                let delivery = message_state::delivery(s, m);
+                let bubble = bubble.children(message_reactions(s, m)).children(actions)
+                    .children(delivery.filter(|label| *label != "Sending…").map(|label|
+                        el().pin(None, None, Some(-28.0), Some(0.0)).child(message_delivery(m, label))));
                 let content = col().gap(4.0).shrink().min_w(0.0);
                 let content = if m.mine { content.items_end() } else { content }
-                    .children(head.then(|| row().gap(8.0).items_center()
-                        .children((!m.mine).then(|| text(m.sender.as_str()).font(type_::LABEL).color(t.text)))
+                    .children((head || m.edited).then(|| row().gap(8.0).items_center().shrink().min_w(0.0)
+                        .children((head && !m.mine).then(|| text(m.sender.as_str()).font(type_::LABEL).color(t.text).truncate().shrink().min_w(0.0)))
                         .child(time)))
                     .child(bubble)
-                    .children(m.edited.then(|| note("Edited").font(type_::LABEL)))
-                    .children(message_state::delivery(s, m).map(|label| note(label).font(type_::LABEL)))
+                    .children((delivery == Some("Sending…")).then(|| note("Sending…").font(type_::LABEL)))
                     .children((m.deleted && m.mine).then(|| {
                         let m = m.clone();
                         el().key(format!("undo/{}", m.id)).role("button").label("Undo delete").focusable(true)
@@ -245,6 +258,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     }));
                 let line = if m.mine {
                     line.justify_end().items_end().child(content)
+                        .child(el().w(20.0))
                 } else {
                     line.child(if head { user_avatar(s, &m.sender_id, &m.sender, 32.0) } else { el().w(32.0) })
                         .child(content)
@@ -349,6 +363,92 @@ pub(crate) fn panel_width(start: f32, delta: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_toolbar_ignores_empty_row_space_but_stays_on_its_buttons() {
+        let mut s = init();
+        message_states_demo(&mut s);
+        let mut rt = rune::Runtime::new(s, view, (1200.0, 800.0), rune::Env::new(true, 1.0));
+        let settle = |rt: &mut rune::Runtime<State>| for _ in 0..60 { rt.frame(1.0 / 60.0); };
+        settle(&mut rt);
+        for (id, mine) in [("sample-incoming", false), ("sample-outgoing", true)] {
+            let elements = rt.elements();
+            let rect = |prefix| elements.iter().find(|e| e.key.as_deref() == Some(&format!("{prefix}/{id}"))).unwrap().rect;
+            let (line, bubble) = (rect("msg"), rect("bubble"));
+            let outside = (if mine { line[0] + 2.0 } else { line[0] + line[2] - 2.0 }, bubble[1] + bubble[3] / 2.0);
+            let opacity = |rt: &rune::Runtime<State>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(&format!("more/{id}"))).unwrap().opacity;
+            rt.pointer_move(outside.0, outside.1);
+            settle(&mut rt);
+            assert!(opacity(&rt) < 0.01, "blank row space must not reveal actions");
+            rt.pointer_move(bubble[0] + bubble[2] / 2.0, bubble[1] + bubble[3] / 2.0);
+            settle(&mut rt);
+            assert!(opacity(&rt) > 0.99);
+            let (x, y) = rt.find(&format!("more/{id}")).unwrap();
+            rt.pointer_move(x, y);
+            settle(&mut rt);
+            assert!(opacity(&rt) > 0.99, "moving onto the toolbar must keep it visible");
+            rt.pointer_move(outside.0, outside.1);
+            settle(&mut rt);
+            assert!(opacity(&rt) < 0.01);
+            rt.pointer_move(bubble[0] + bubble[2] / 2.0, bubble[1] + bubble[3] / 2.0);
+            settle(&mut rt);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            settle(&mut rt);
+            assert_eq!(rt.state.menu.as_deref(), Some(id));
+            rt.pointer_move(outside.0, outside.1);
+            settle(&mut rt);
+            assert!(opacity(&rt) > 0.99, "open menu must keep its toolbar visible");
+            rt.update(|s, _| s.menu = None);
+            settle(&mut rt);
+        }
+    }
+
+    #[test]
+    fn edited_label_follows_timestamp_even_in_grouped_messages() {
+        for width in [640.0, 1200.0] {
+            let mut s = init();
+            message_states_demo(&mut s);
+            let msgs = &mut s.messages.as_mut().unwrap().as_mut().unwrap().msgs;
+            let mut grouped = msgs[1].clone();
+            grouped.id = "grouped-edit".into();
+            grouped.server_id = "102".into();
+            grouped.time = "2026-11-17T10:25:00Z".into();
+            assert!(same_message_group(&msgs[1], &grouped));
+            msgs.push(grouped);
+            let mut rt = rune::Runtime::new(s, view, (width, 800.0), rune::Env::new(true, 1.0));
+            for _ in 0..60 { rt.frame(1.0 / 60.0); }
+            let elements = rt.elements();
+            for id in ["sample-incoming", "sample-outgoing", "grouped-edit"] {
+                let time = elements.iter().find(|e| e.key.as_deref() == Some(&format!("time/{id}"))).unwrap();
+                let bubble = elements.iter().find(|e| e.key.as_deref() == Some(&format!("bubble/{id}"))).unwrap();
+                assert!(time.text.as_deref().unwrap().ends_with(" · Edited"));
+                assert!(time.rect[1] + time.rect[3] <= bubble.rect[1]);
+                assert!(time.rect[0] + time.rect[2] <= width);
+            }
+            assert!(!elements.iter().any(|e| e.text.as_deref() == Some("Edited")));
+        }
+    }
+
+    #[test]
+    fn delivery_icons_stay_beside_outgoing_bubble() {
+        for seen in [false, true] {
+            for width in [640.0, 1200.0] {
+                let mut s = init();
+                message_states_demo(&mut s);
+                if !seen { s.message_state.seen.clear(); }
+                let mut rt = rune::Runtime::new(s, view, (width, 800.0), rune::Env::new(true, 1.0));
+                for _ in 0..60 { rt.frame(1.0 / 60.0); }
+                let elements = rt.elements();
+                let status = elements.iter().find(|e| e.key.as_deref() == Some("delivery/sample-outgoing")).unwrap();
+                let bubble = elements.iter().find(|e| e.key.as_deref() == Some("bubble/sample-outgoing")).unwrap();
+                assert!((status.rect[0] - bubble.rect[0] - bubble.rect[2] - 8.0).abs() < 1.0);
+                assert!(status.rect[0] + status.rect[2] <= width);
+                assert!((status.rect[1] + status.rect[3] - bubble.rect[1] - bubble.rect[3]).abs() < 1.0);
+                assert_eq!(elements.iter().filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("delivery/"))).count(), 1);
+            }
+        }
+    }
 
     #[test]
     fn search_shortcut_and_dismissal() {

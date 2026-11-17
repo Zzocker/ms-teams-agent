@@ -12,7 +12,18 @@ pub(crate) fn nearby_previews(s: &State) -> impl Iterator<Item = String> + '_ {
             vw > 0.0 && vh > 0.0 && w > 0.0 && h > 0.0 && x < vx + vw && x + w > vx
                 && y < vy + vh + 200.0 && y + h > vy - 200.0
         }))
-        .flat_map(|m| m.images.iter().cloned().chain(m.files.iter().filter_map(|f| f.preview.clone())))
+        .flat_map(|m| m.images.iter().cloned().chain(m.files.iter().filter_map(|f| f.preview.clone()))
+            .chain(teams::animated_emojis(&m.raw).into_iter().map(|(url, _, _)| url)))
+}
+
+#[cfg(feature = "image")]
+pub(crate) fn message_emoji(s: &State, url: &str, alt: &str, size: u16) -> El {
+    let tile = el().size(f32::from(size), f32::from(size)).role("img").label(alt);
+    match s.images.get(url) {
+        Some(Some(image)) => tile.pixels_fit(image.pixels(), rune::SurfaceFit::Fit),
+        Some(None) => tile.center().child(text(alt).font(tok::TextStyle { size: f32::from(size) * 0.8, ..type_::BODY })),
+        None => tile.radius(8.0).fill(tok::theme(dark()).hover).help("Loading emoji"),
+    }
 }
 
 /// A picture's tile in a message, as Teams lays them out side by side.
@@ -142,6 +153,44 @@ pub(crate) fn file_card(s: &State, f: &teams::File) -> El {
 #[cfg(all(test, feature = "image"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animated_emojis_use_small_tiles_and_viewport_loading() {
+        for (width, asset, size) in [(640.0, "100", 58.0), (1200.0, "100", 58.0), (640.0, "20", 58.0), (1200.0, "20", 58.0)] {
+            let mut s = init();
+            demo(&mut s);
+            let emoji = r#"<img itemtype="http://schema.skype.com/Emoji" src="https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/muscle/default/100_f_s3.png" alt="💪🏼">"#;
+            let emoji = emoji.replace("100_f", &format!("{asset}_f"));
+            let raw = format!("<div>{emoji}{emoji}</div>");
+            s.messages.as_mut().unwrap().as_mut().unwrap().msgs = teams::parse_messages(&serde_json::json!({"messages":[{
+                "id":"101", "messagetype":"RichText/Html", "content":raw
+            }]}), "me");
+            let mut rt = rune::Runtime::new(s, view, (width, 800.0), rune::Env::new(true, 1.0));
+            for _ in 0..60 { rt.frame(1.0 / 60.0); }
+            let elements = rt.elements();
+            let first = elements.iter().find(|e| e.key.as_deref() == Some("emoji/101/0")).unwrap();
+            let second = elements.iter().find(|e| e.key.as_deref() == Some("emoji/101/1")).unwrap();
+            assert_eq!(&first.rect[2..], &[size, size]);
+            assert!(second.rect[0] >= first.rect[0] + size);
+            assert_eq!(first.rect[1], second.rect[1]);
+            assert!(second.rect[0] + size <= width);
+            assert!(!elements.iter().any(|e| e.text.as_deref() == Some("💪🏼💪🏼")));
+            assert!(!elements.iter().any(|e| e.text.as_deref() == Some("💪🏼")), "loading must not flash a static emoji");
+            assert_eq!(nearby_previews(&rt.state).count(), 2);
+            let rect = first.rect;
+            let url = nearby_previews(&rt.state).next().unwrap();
+            let image = rune::ImageCache::new(Arc::new(|| {})).rgba(4, 4, vec![255; 64]);
+            rt.update(|s, _| s.images.insert(url.clone(), Some(image)));
+            for _ in 0..60 { rt.frame(1.0 / 60.0); }
+            let loaded = rt.elements();
+            assert_eq!(loaded.iter().find(|e| e.key.as_deref() == Some("emoji/101/0")).unwrap().rect, rect);
+            rt.update(|s, _| s.images.insert(url, None));
+            rt.frame(0.0);
+            assert!(rt.elements().iter().any(|e| e.text.as_deref() == Some("💪🏼") && e.rect[3] >= 40.0), "failed loads keep a large readable fallback");
+            rt.state.preview_viewport.set([0.0, 2000.0, width, 800.0]);
+            assert!(nearby_previews(&rt.state).next().is_none());
+        }
+    }
 
     #[test]
     fn preview_queue_follows_viewport_with_scroll_margin() {

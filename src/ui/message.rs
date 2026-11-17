@@ -6,6 +6,14 @@ use crate::*;
 #[path = "message/reaction_tests.rs"]
 mod reaction_tests;
 
+pub(crate) fn message_delivery(m: &Msg, label: &'static str) -> El {
+    static SENT: rune::Icon = rune::Icon { name: "message-sent", view: 24.0, body: r#"<circle cx="12" cy="12" r="9.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m7.5 12 3 3 6-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"# };
+    static SEEN: rune::Icon = rune::Icon { name: "message-seen", view: 24.0, body: r#"<path d="M2 14c1.8-5.5 5.1-8 10-8s8.2 2.5 10 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="14" r="4.5" fill="currentColor"/>"# };
+    el().key(format!("delivery/{}", m.id)).role("img").label(label).help(label)
+        .size(20.0, 24.0).center()
+        .child(rune::icon(if label == "Seen" { &SEEN } else { &SENT }, 20.0).color(tok::accent(0, dark())))
+}
+
 pub(crate) fn message_reactions(s: &State, m: &Msg) -> Option<El> {
     if m.reactions.is_empty() { return None; }
     let t = tok::theme(dark());

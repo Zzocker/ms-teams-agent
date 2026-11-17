@@ -97,7 +97,7 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
         if let Some(Ok(page)) = &mut s.messages {
             let original = page.msgs[0].clone();
             page.msgs[1].reply = Some(teams::Reply {
-                id: original.server_id, sender: original.sender, time: original.time, text: original.text,
+                id: original.server_id, sender: original.sender, sender_id: original.sender_id, time: original.time, text: original.text,
             });
             // A short answer: the quote must still widen the bubble.
             page.msgs[1].text = "Well done".into();

@@ -65,3 +65,37 @@ pub fn ams_preview(url: &str) -> Option<String> {
     let id_ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
     (host_ok && id_ok).then(|| format!("https://{host}/v1/objects/{id}/views/imgo"))
 }
+
+/// Only public Giphy image hosts are fetched, without an account token.
+pub fn giphy_image(url: &str) -> Option<String> {
+    let (host, path) = url.strip_prefix("https://")?.split_once('/')?;
+    let path = path.split('?').next()?;
+    (matches!(host, "media.giphy.com" | "media0.giphy.com" | "media1.giphy.com" | "media2.giphy.com" | "media3.giphy.com" | "media4.giphy.com" | "i.giphy.com")
+        && path.starts_with("media/") && (path.ends_with(".gif") || path.ends_with(".webp")))
+        .then(|| url.to_owned())
+}
+
+/// Public Teams emoji sprites never receive an account token.
+#[cfg(any(feature = "image", test))]
+pub fn emoji_animation(src: &str) -> Option<String> {
+    let path = src.strip_prefix("https://statics.teams.cdn.office.net/")?.split('?').next()?;
+    let parts: Vec<_> = path.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() != 8 || parts[..5] != ["evergreen-assets", "personal-expressions", "v2", "assets", "emoticons"]
+        || parts[6] != "default" || parts[5].is_empty()
+        || !parts[5].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return None;
+    }
+    let (size, variant) = parts[7].split_once('_')?;
+    if !matches!(size, "20" | "40" | "60" | "80" | "100") { return None; }
+    let file = match variant {
+        "f.png" | "anim_f.png" => "100_anim_f.png",
+        "f_s1.png" | "anim_f_s1.png" => "100_anim_f_s1.png",
+        "f_s2.png" | "anim_f_s2.png" => "100_anim_f_s2.png",
+        "f_s3.png" | "anim_f_s3.png" => "100_anim_f_s3.png",
+        "f_s4.png" | "anim_f_s4.png" => "100_anim_f_s4.png",
+        "f_s5.png" | "anim_f_s5.png" => "100_anim_f_s5.png",
+        "f_s6.png" | "anim_f_s6.png" => "100_anim_f_s6.png",
+        _ => return None,
+    };
+    Some(format!("https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/{}/default/{file}", parts[5]))
+}

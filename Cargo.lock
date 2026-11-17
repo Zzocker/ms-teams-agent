@@ -1768,6 +1768,7 @@ dependencies = [
  "futures-lite",
  "image",
  "notify-rust",
+ "png 0.18.1",
  "pulldown-cmark",
  "rune",
  "semver",
