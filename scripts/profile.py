@@ -50,11 +50,11 @@ def prepare(destination, headless=False):
                     + '\n' + (ROOT / 'scripts/profile_alloc.rs').read_text())
     # Fail closed if these handlers move; disable user-initiated writes in this copy too.
     for filename, signatures in {
+        'src/teams/reactions.rs': ('pub fn react(s: &Session, chat: &str, message: &str, key: &str, remove: bool) -> Result<(), String> {',),
         'src/actions.rs': ('pub(crate) fn sign_out(s: &mut State) {',
                            'pub(crate) fn send(s: &mut State) {',
                            'pub(crate) fn delete_message(s: &mut State) {'),
         'src/teams.rs': ('pub fn mark_read(s: &Session, chat_id: &str, horizon: &ReadHorizon) -> Result<(), String> {',),
-        'src/teams/reactions.rs': ('pub fn react(s: &Session, chat: &str, message: &str, key: &str, remove: bool) -> Result<(), String> {',),
     }.items():
         path = destination / filename
         source = path.read_text()
