@@ -4,7 +4,7 @@ use crate::*;
 
 pub(crate) fn demo(s: &mut State) {
     let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), channel: false, title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b", latest: None };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), mentions: vec![] };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), reactions: vec![], mentions: vec![] };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
@@ -88,6 +88,15 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
             });
             // A short answer: the quote must still widen the bubble.
             page.msgs[1].text = "Well done".into();
+        }
+    }),
+    ("copy-link", |s| {
+        demo(s);
+        if let Some(Ok(page)) = &mut s.messages {
+            page.msgs.truncate(1);
+            let (text, links) = teams::html_to_rich(r#"<p>Test data: café 🧪<br>Spec: <a href="https://example.com/specification?version=14&amp;mode=test">https://example.com/spec...</a><br>Notes: <a href="https://example.org/notes/full-document">https://example.org/notes…</a><br>Named link: <a href="https://example.net/guide">Read the guide</a><br>Literal dots: wait...</p>"#);
+            (page.msgs[0].text, page.msgs[0].links) = (text, links);
+            s.menu = Some(page.msgs[0].id.clone());
         }
     }),
     ("link", |s| {

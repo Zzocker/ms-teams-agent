@@ -34,7 +34,7 @@ def prepare(destination, headless=False):
     source = replace_once(source, '        notifications::start(s);\n', '')
     source = replace_once(source, '    let desktop = std::env::args().len() == 1;', '    let desktop = false;')
     source = replace_once(source,
-                          'if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {\n        let mine =',
+                          'if !cfg!(test) && std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {\n        let mine =',
                           'if false && let Screen::Main { session, chats } = &s.screen {\n        let mine =')
     if headless:
         # Only this profiling copy may use real sessions with Rune's headless arguments.
@@ -44,21 +44,22 @@ def prepare(destination, headless=False):
         source = source.replace(guard, 'true')
     source = replace_once(source, '    if let Some((id, link, r)) = s.older_loader.take() {', '    if let Some((id, link, r)) = s.older_loader.take() {\n        if let Err(error) = &r { eprintln!(\"PROFILE_ERROR older: {error}\"); }')
     # Stop background media reloads once the cache-clear experiment begins.
-    source = replace_once(source, 'if true && let Screen::Main { session, chats } = &s.screen {' if headless else 'if std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {',
+    source = replace_once(source, 'if !cfg!(test) && true && let Screen::Main { session, chats } = &s.screen {' if headless else 'if !cfg!(test) && std::env::args().len() == 1 && let Screen::Main { session, chats } = &s.screen {',
                           'if !PROFILE_CLEARED.load(SeqCst) && let Screen::Main { session, chats } = &s.screen {')
     path.write_text(source + '\n' + (ROOT / 'scripts/profile_driver.rs').read_text()
                     + '\n' + (ROOT / 'scripts/profile_alloc.rs').read_text())
     # Fail closed if these handlers move; disable user-initiated writes in this copy too.
     for filename, signatures in {
+        'src/teams/reactions.rs': ('pub fn react(s: &Session, chat: &str, message: &str, key: &str, remove: bool) -> Result<(), String> {',),
         'src/actions.rs': ('pub(crate) fn sign_out(s: &mut State) {',
                            'pub(crate) fn send(s: &mut State) {',
                            'pub(crate) fn delete_message(s: &mut State) {'),
-        'src/teams.rs': ('pub fn mark_read(s: &Session, chat_id: &str, page: &Page) -> Result<(), String> {',),
+        'src/teams.rs': ('pub fn mark_read(s: &Session, chat_id: &str, horizon: &ReadHorizon) -> Result<(), String> {',),
     }.items():
         path = destination / filename
         source = path.read_text()
         for signature in signatures:
-            result = 'return Ok(());' if 'mark_read' in signature else 'return;'
+            result = 'return Ok(());' if '-> Result<' in signature else 'return;'
             source = replace_once(source, signature, '#[allow(unreachable_code, unused_variables)]\n' + signature + '\n    ' + result)
         path.write_text(source)
     path = destination / 'src/images.rs'

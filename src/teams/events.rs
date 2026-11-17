@@ -288,6 +288,21 @@ mod tests {
         }
     }
     #[test]
+    fn reaction_republishes_parse_counts_without_becoming_new_messages() {
+        let mut event = serde_json::json!({"resourceType":"MessageUpdate","resource":{
+            "id":"123","conversationLink":"https://service/conversations/a","messagetype":"Text",
+            "content":"Test data","from":"8:orgid:other",
+            "properties":{"emotions":[{"key":"heart","users":[{"mri":"8:orgid:me"},{"mri":"8:orgid:other"}]}]}
+        }});
+        let Some(Update::Message { message:Some(message), new, .. }) = message_update(&event, &User { id:"me".into(), ..Default::default() }) else { panic!() };
+        assert!(!new);
+        assert_eq!(message.reactions[0].users.len(), 2);
+        assert!(message.reactions[0].mine("me"));
+        event["resource"]["properties"]["emotions"] = serde_json::json!([]);
+        let Some(Update::Message { message:Some(message), .. }) = message_update(&event, &User::default()) else { panic!() };
+        assert!(message.reactions.is_empty());
+    }
+    #[test]
     fn decodes_plain_and_packed_payloads() {
         let body = serde_json::json!({"type":"EventMessage"});
         assert_eq!(decode_body(&serde_json::json!({"body":body.to_string()})).unwrap(), body);

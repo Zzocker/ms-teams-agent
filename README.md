@@ -26,7 +26,7 @@ Download a build from [Releases](https://github.com/Zzocker/ms-teams-agent/relea
 - [ ] Start new chats and create group chats
 - [ ] Search message history
 - [ ] Upload documents and other files
-- [ ] Message reactions
+- [x] Message reactions (six quick choices; existing reaction counts)
 - [ ] Presence and typing indicators
 - [ ] Voice and video calls
 - [ ] Calendar and meetings

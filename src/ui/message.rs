@@ -2,9 +2,29 @@
 
 use crate::*;
 
+#[cfg(test)]
+#[path = "message/reaction_tests.rs"]
+mod reaction_tests;
+
+pub(crate) fn message_reactions(s: &State, m: &Msg) -> Option<El> {
+    if m.reactions.is_empty() { return None; }
+    let t = tok::theme(dark());
+    let me = match &s.screen { Screen::Main { session, .. } => session.user.id.as_str(), _ => "" };
+    Some(row().flex_wrap().gap(4.0).mt(4.0).children(m.reactions.iter().map(|r| {
+        let mine = r.mine(me);
+        let (message, key) = (m.clone(), r.key.clone());
+        el().key(format!("reaction/{}/{}", m.id, r.key)).role("button")
+            .label(format!("{}: {} reaction{}{}", r.key, r.users.len(), if r.users.len() == 1 { "" } else { "s" }, if mine { ", including you; remove reaction" } else { "; add reaction" }))
+            .focusable(true).px(6.0).py(3.0).radius(8.0).cursor(rune::Cursor::Pointer).hover(t.hover)
+            .fill(if mine { tok::accent(0, dark()).alpha(0.25) } else { t.bg })
+            .border(1.0, if mine { tok::accent(0, dark()) } else { t.separator })
+            .on_press(move |s: &mut State| react(s, &message, &key))
+            .child(text(format!("{} {}", r.emoji(), r.users.len())).font(type_::LABEL).color(t.text))
+    })))
+}
+
 /// The hover toolbar of a message the server has (its actions need its id): edit for one of
 /// mine, quote (reply) for someone else's, and "…" for the rest. It stays shown while its menu is open.
-// shortcut: no reactions yet; add their buttons here when the client can send them.
 pub(crate) fn message_actions(m: &Msg, shown: bool) -> Option<El> {
     static PENCIL: rune::Icon = rune::Icon { name: "msg-edit", view: 20.0, body: r#"<path d="M13.5 3.5l3 3L7 16H4v-3z M11.5 5.5l3 3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
     static QUOTE: rune::Icon = rune::Icon { name: "msg-quote", view: 20.0, body: r#"<path d="M4 11.5c0-3 1.5-5 4-5.5 M4 11.5h3.5v3.5H4z M11 11.5c0-3 1.5-5 4-5.5 M11 11.5h3.5v3.5H11z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
@@ -43,15 +63,36 @@ pub(crate) fn message_menu(s: &State) -> Option<El> {
     let item = |key: &'static str, label: &'static str| row().key(key).role("menuitem").label(label).focusable(true)
         .w_full().px(12.0).py(6.0).radius(4.0).cursor(rune::Cursor::Pointer).hover(t.hover)
         .child(text(label).font(type_::BODY).color(t.text));
-    let (reply, copy, edit, delete) = (m.clone(), m.text.clone(), m.clone(), m.clone());
+    let (reply, copy, edit, delete) = (m.clone(), copy_text(m), m.clone(), m.clone());
     Some(col().key("message-menu").role("menu").label("Message options").min_w(160.0).padding(4.0).radius(8.0)
         .fill(t.card).border(1.0, t.separator).shadow(4.0, 16.0, rune::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.4 })
         .anchored(format!("more/{id}"), Side::Bottom, Align::End, 4.0)
         .modal(true, |s: &mut State| s.menu = None)
+        .child(text("React").font(type_::LABEL).color(t.text_secondary).px(8.0).py(4.0))
+        .child(row().gap(2.0).children(teams::REACTIONS.iter().map(|(key, emoji)| {
+            let m = m.clone();
+            el().key(format!("react/{key}")).role("button").label(format!("React {key}")).focusable(true)
+                .size(32.0, 32.0).center().radius(4.0).hover(t.hover).cursor(rune::Cursor::Pointer)
+                .on_press(move |s: &mut State| react(s, &m, key))
+                .child(text(*emoji).font(type_::BODY).color(t.text))
+        })))
         .children(m.mine.then(|| item("menu-reply", "Reply").on_press(move |s: &mut State| start_reply(s, &reply))))
         .child(item("menu-copy", "Copy text").on_press_tx(move |s: &mut State, tx| { tx.copy(copy.clone()); s.menu = None; }))
         .children(m.mine.then(|| item("menu-edit", "Edit").on_press(move |s: &mut State| start_edit(s, &edit))))
         .children(m.mine.then(|| item("menu-delete", "Delete").on_press(move |s: &mut State| { s.deleting = Some(delete.clone()); s.menu = None; }))))
+}
+
+/// Teams abbreviates URL labels; the clipboard needs their full destinations.
+fn copy_text(m: &Msg) -> String {
+    let mut text = m.text.clone();
+    for (range, url) in m.links.iter().rev() {
+        let label = &m.text[range.clone()];
+        if (label.starts_with("https://") || label.starts_with("http://"))
+            && (label.contains("...") || label.contains('…')) {
+            text.replace_range(range.clone(), url);
+        }
+    }
+    text
 }
 
 /// A message's text, its web links in the accent colour and opened in the browser on a click.
@@ -90,4 +131,48 @@ pub(crate) fn md_spans(md: &markdown::Md) -> Vec<rune::Span> {
             Style::Block => span.mono(),
         }
     }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_menu_expands_shortened_urls_and_pastes_the_full_message() {
+        let mut s = init();
+        crate::demo::SCENES.iter().find(|(name, _)| *name == "copy-link").unwrap().1(&mut s);
+        let expected = "Test data: café 🧪\nSpec: https://example.com/specification?version=14&mode=test\nNotes: https://example.org/notes/full-document\nNamed link: Read the guide\nLiteral dots: wait...";
+        let board = rune::clipboard::memory();
+        let mut rt = rune::Runtime::new(s, view, (1200.0, 800.0), rune::Env::new(true, 1.0));
+        rt.use_clipboard(&board);
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let (x, y) = rt.find("menu-copy").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert_eq!(board.text().as_deref().map(String::as_str), Some(expected));
+        assert!(rt.state.menu.is_none());
+        rt.update(|_, tx| { tx.focus("draft", false); });
+        rt.frame(0.0);
+        rt.update(|_, tx| tx.request_paste());
+        rt.frame(0.0);
+        assert_eq!(rt.state.draft.text, expected);
+        if let Ok(path) = std::env::var("COPY_LINK_EVIDENCE") {
+            std::fs::write(format!("{path}.txt"), &rt.state.draft.text).unwrap();
+            rune::App::new(AppSpec::new("Copy URL regression", (1200.0, 800.0), init, view))
+                .init(move || rt.state)
+                .args(["--snap".into(), path, "--scale".into(), "1".into()])
+                .run();
+        }
+    }
+
+    #[test]
+    fn copy_preserves_plain_text_and_unshortened_links() {
+        let mut s = init();
+        demo(&mut s);
+        let m = &mut s.messages.as_mut().unwrap().as_mut().unwrap().msgs[0];
+        assert_eq!(copy_text(m), m.text);
+        (m.text, m.links) = teams::html_to_rich(r#"<a href="https://example.com/full">https://example.com/full</a> <a href="https://example.org/other">Read more...</a>"#);
+        assert_eq!(copy_text(m), m.text);
+    }
 }

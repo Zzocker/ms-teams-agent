@@ -46,6 +46,19 @@ pub(crate) fn preview_text(draft: &str) -> El {
     text(draft)
 }
 
+pub(crate) fn composer_preview(s: &State) -> Option<El> {
+    #[cfg(feature = "markdown")]
+    if !s.editor && !markdown::parse(&s.draft.text).spans.is_empty() {
+        let t = tok::theme(dark());
+        return Some(col().key("composer-preview").w_full().max_h(160.0).gap(4.0)
+            .label("Message preview").scroll(ScrollSpec { stick_bottom: false })
+            .child(text("Preview").font(type_::LABEL).color(t.text_secondary))
+            .child(preview_text(&s.draft.text).font(type_::BODY).color(t.text).wrap_anywhere()));
+    }
+    let _ = s;
+    None
+}
+
 /// The writing side's share after moving the divider `delta` points across `width`.
 pub(crate) fn editor_split(start: f32, delta: f32, width: f32) -> f32 {
     if width <= 0.0 { return start }
@@ -111,6 +124,37 @@ pub(crate) fn draft_editor(s: &State) -> Option<El> {
 
 #[cfg(test)]
 mod tests {
+    use crate::*;
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn normal_composer_previews_code_while_typing() {
+        let mut s = init();
+        demo(&mut s);
+        let mut rt = rune::Runtime::new(s, view, (1200.0, 800.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|_, tx| { tx.focus("draft", false); });
+        rt.frame(0.0);
+        for ch in "Test data: run `cargo test` before sending.".chars() {
+            rt.key(rune::KeyEvent { key: rune::Key::Text(ch.to_string()), mods: Default::default() });
+            rt.frame(0.0);
+        }
+        let preview = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("composer-preview")).unwrap();
+        assert!(preview.rect[2] > 0.0 && preview.rect[3] > 0.0);
+        assert_eq!(rt.state.draft.text, "Test data: run `cargo test` before sending.");
+        assert!(!rt.state.editor);
+        if let Ok(path) = std::env::var("COMPOSER_PREVIEW_EVIDENCE") {
+            rune::App::new(AppSpec::new("Composer preview regression", (1200.0, 800.0), init, view))
+                .init(move || rt.state).args(["--snap".into(), path, "--scale".into(), "1".into()]).run();
+            return;
+        }
+        rt.update(|s, _| s.editor = true);
+        rt.frame(0.0);
+        assert!(super::composer_preview(&rt.state).is_none());
+        rt.update(|s, _| { s.editor = false; s.draft.clear(); });
+        rt.frame(0.0);
+        assert!(super::composer_preview(&rt.state).is_none());
+    }
 
     #[test]
     fn editor_split_moves_by_share_of_width_and_stays_in_bounds() {
