@@ -301,7 +301,8 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                                     .on_input_change(mention_changed)
                                     .on_input_key(mention_key)
                                     .on_submit(|s: &mut State, _| if in_code_block(&s.draft.text[..s.draft.range().0]) { s.draft.insert("\n") } else { send(s) })), 1, 6)
-                            }))
+                            })
+                            .children(composer_preview(s)))
                         .child(button("editor", "Editor", false, |s| s.editor = true))
                         .child(button("send", "Send", true, send)))))
         }
