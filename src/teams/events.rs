@@ -285,6 +285,8 @@ mod tests {
         for (id, properties, channel) in [
             ("19:channel@thread.tacv2", serde_json::json!({}), true),
             ("19:legacy@thread.skype", serde_json::json!({}), true),
+            ("19:channel@thread.tacv2;messageid=123", serde_json::json!({}), true),
+            ("19:legacy@thread.skype;messageid=123", serde_json::json!({}), true),
             ("opaque-channel", serde_json::json!({"threadType":"topic"}), true),
             ("19:group@thread.v2", serde_json::json!({}), false),
         ] {

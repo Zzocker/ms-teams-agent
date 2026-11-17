@@ -80,7 +80,11 @@ pub(super) fn parse_conversations(v: &Value, me: &User) -> Vec<Chat> {
             };
             Chat {
                 id: c["id"].as_str().unwrap_or("").into(),
-                channel: c["id"].as_str().is_some_and(|id| id.ends_with("@thread.tacv2") || id.ends_with("@thread.skype"))
+                channel: c["id"].as_str().is_some_and(|id| {
+                    // Channel reply threads append a message marker to the channel ID.
+                    let thread = id.split(';').next().unwrap_or(id);
+                    thread.ends_with("@thread.tacv2") || thread.ends_with("@thread.skype")
+                })
                     || matches!(c["threadProperties"]["threadType"].as_str(), Some("space" | "topic")),
                 title: title.into(),
                 avatar_members: Vec::new(),
@@ -305,12 +309,14 @@ mod tests {
         let value = json!({"conversations":[
             {"id":"19:channel@thread.tacv2"},
             {"id":"19:legacy@thread.skype"},
+            {"id":"19:channel@thread.tacv2;messageid=123"},
+            {"id":"19:legacy@thread.skype;messageid=456"},
             {"id":"opaque-channel", "threadProperties":{"threadType":"space"}},
             {"id":"19:group@thread.v2"},
             {"id":"19:me_other@unq.gbl.spaces"}
         ]});
         let all = parse_conversations(&value, &User::default());
-        assert_eq!(all.iter().map(|c| c.channel).collect::<Vec<_>>(), [true, true, true, false, false]);
+        assert_eq!(all.iter().map(|c| c.channel).collect::<Vec<_>>(), [true, true, true, true, true, false, false]);
         assert_eq!(parse_chats(&value, &User::default()).len(), 2);
     }
 

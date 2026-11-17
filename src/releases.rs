@@ -72,8 +72,7 @@ fn apply_result(s: &mut State, result: Result<Option<Release>, String>) {
 }
 
 fn open(s: &mut State) {
-    s.release_panel = !s.release_panel;
-    if s.release_panel && matches!(s.release_status, Status::Idle) { check(s); }
+    s.settings_panel = !s.settings_panel;
 }
 
 fn open_download(s: &mut State, tx: &mut Tx) {
@@ -87,25 +86,18 @@ fn open_releases(s: &mut State, tx: &mut Tx) {
 }
 
 pub fn nav_button(s: &State) -> El {
-    static UPDATE_ICON: rune::Icon = rune::Icon {
-        name: "nav-updates", view: 24.0,
-        body: r#"<path d="M20 7v5h-5 M4 17v-5h5 M6.1 7a7 7 0 0 1 11.6-1L20 9 M4 15l2.3 3a7 7 0 0 0 11.6-1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    static SETTINGS_ICON: rune::Icon = rune::Icon {
+        name: "nav-settings", view: 24.0,
+        body: r#"<circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2" fill="none" stroke="currentColor" stroke-width="2"/>"#,
     };
     let t = tok::theme(dark());
     let pending = s.release_loader.is_pending();
-    let label = if pending { "Checking for updates…" } else {
-        match s.release_status {
-            Status::Available(_) => "Update available",
-            Status::Failed => "Update check failed",
-            _ => "Check for updates",
-        }
-    };
-    el().key("updates-control").role("button").label(label).focusable(true)
-        .w_full().h(44.0).center().radius(6.0).hover(t.hover)
-        .fill(if s.release_panel { t.press } else { t.bg }).cursor(rune::Cursor::Pointer)
+    col().key("settings-control").role("button").label("Settings").focusable(true)
+        .w_full().center().gap(4.0).py(10.0).radius(6.0).hover(t.hover)
+        .fill(if s.settings_panel { t.press } else { t.bg }).cursor(rune::Cursor::Pointer)
         .on_press(open)
-        .child(if pending { loading_messages().size(24.0, 24.0).label("Checking for updates") }
-            else { rune::icon(&UPDATE_ICON, 24.0).color(t.text) })
+        .child(rune::icon(&SETTINGS_ICON, 24.0).color(t.text))
+        .child(text("Settings").font(type_::LABEL).color(t.text))
         .children((!pending && matches!(s.release_status, Status::Available(_))).then(||
             el().size(6.0, 6.0).radius(3.0).fill(tok::accent(0, dark()))
                 .pin(None, Some(6.0), Some(10.0), None)))
@@ -121,7 +113,7 @@ const INSTALL: &str = "Download and extract the Apple Silicon archive. Quit Team
 const INSTALL: &str = "Download the package for your system. Quit Teams, replace your installed application, then reopen it.";
 
 pub fn panel(s: &State) -> Option<El> {
-    if !s.release_panel { return None; }
+    if !s.settings_panel { return None; }
     let t = tok::theme(dark());
     let pending = s.release_loader.is_pending();
     let (heading, explanation) = if pending {
@@ -141,36 +133,53 @@ pub fn panel(s: &State) -> Option<El> {
     let action = link("check-updates", match s.release_status {
         Status::Failed => "Try again", Status::Idle => "Check for updates", _ => "Check again",
     }).fill(t.control_off).on_press(check);
-    Some(col().key("updates-panel").role("dialog").label("Application updates").w(360.0).max_h(380.0).padding(16.0).gap(12.0)
+    Some(col().w_full().h_full().center().padding(20.0).fill(t.bg.alpha(0.5)).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .child(col().key("settings-panel").role("dialog").label("Settings").w_full().max_w(900.0).h_full().max_h(680.0).min_h(0.0)
         .radius(12.0).fill(t.card).border(1.0, t.separator)
         .shadow(4.0, 16.0, rune::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 })
-        .anchored_fit("updates-control", Side::Right, Align::Start, 8.0)
-        .modal(true, |s: &mut State| s.release_panel = false)
-        .child(row().w_full().items_center()
-            .child(text("Application updates").font(type_::TITLE).color(t.text).grow(1.0))
-            .child(link("close-updates", "Close").on_press(|s: &mut State| s.release_panel = false)))
-        .child(col().key("update-details").w_full().gap(12.0)
-            .child(col().w_full().gap(6.0)
-                .child(text(&heading).font(type_::TITLE).color(t.text).wrap())
-                .child(note(explanation)))
-            .child(note(concat!("Installed version: ", env!("CARGO_PKG_VERSION"))))
-            .children(s.release_checked_at.map(|time| note(&format!("Last successful check: {}", time.format("%b %-d at %-I:%M %p")))))
-            .children((!pending && matches!(s.release_status, Status::Available(_))).then(||
-                col().gap(8.0).padding(12.0).radius(8.0).fill(t.bg)
-                    .child(text("How to update").font(type_::LABEL).color(t.text))
-                    .child(note(INSTALL))
-                    .child(note("Your sign-in and settings will be kept."))))
-            .children(s.release_open_error.then(|| col().gap(4.0)
-                .child(note("Couldn't open your browser. Copy this address to browse releases:"))
-                .child(text(RELEASES).font(type_::LABEL).color(t.text).wrap().selectable(true))))
-            .scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0))
-        .child(row().w_full().gap(6.0).items_center()
-            .child(link("browse-releases", "All releases").on_press_tx(open_releases))
-            .child(el().grow(1.0))
-            .children((!pending).then(|| if matches!(s.release_status, Status::Available(_)) {
-                link("download-update", "Download update").fill(tok::accent(0, dark())).on_press_tx(open_download)
-            } else { action })))
-        .child(text("Checks include preview releases. Updates are installed manually.").font(type_::LABEL).color(t.text_secondary).wrap()))
+        .modal(true, |s: &mut State| s.settings_panel = false)
+        .child(row().w_full().items_center().px(24.0).py(16.0).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
+            .child(text("Settings").font(type_::TITLE).color(t.text).grow(1.0))
+            .child(link("close-settings", "Close").on_press(|s: &mut State| s.settings_panel = false)))
+        .child(row().w_full().grow(1.0).min_h(0.0)
+            .child(col().key("settings-navigation").w(160.0).h_full().padding(12.0).gap(6.0).fill(t.bg)
+                .border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
+                .children([(false, "settings-appearance", "Appearance"), (true, "settings-updates", "Updates")].into_iter().map(|(updates, key, label)|
+                    link(key, label).w_full().fill(if s.settings_updates == updates { t.press } else { t.bg })
+                        .on_press(move |s: &mut State| s.settings_updates = updates))))
+            .child(if !s.settings_updates {
+                col().key("appearance-settings").grow(1.0).min_w(0.0).h_full().padding(20.0).gap(16.0)
+                    .child(text("Appearance").font(type_::TITLE).color(t.text))
+                    .child(col().w_full().padding(16.0).gap(8.0).radius(8.0).border(1.0, t.separator)
+                        .child(text("Theme").font(type_::TITLE).color(t.text))
+                        .child(note("Choose System, Dark, or Light."))
+                        .child(theme_button(s.theme)))
+            } else {
+                col().grow(1.0).min_w(0.0).h_full().min_h(0.0).padding(20.0).gap(12.0)
+                    .child(col().key("update-details").w_full().gap(12.0).padding(16.0).radius(8.0).border(1.0, t.separator)
+                        .child(text("Updates").font(type_::TITLE).color(t.text))
+                        .child(col().w_full().gap(6.0)
+                            .child(text(&heading).font(type_::TITLE).color(t.text).wrap())
+                            .child(note(explanation)))
+                        .child(note(concat!("Installed version: ", env!("CARGO_PKG_VERSION"))))
+                        .children(s.release_checked_at.map(|time| note(&format!("Last successful check: {}", time.format("%b %-d at %-I:%M %p")))))
+                        .children((!pending && matches!(s.release_status, Status::Available(_))).then(||
+                            col().gap(8.0).padding(12.0).radius(8.0).fill(t.bg)
+                                .child(text("How to update").font(type_::LABEL).color(t.text))
+                                .child(note(INSTALL))
+                                .child(note("Your sign-in and settings will be kept."))))
+                        .children(s.release_open_error.then(|| col().gap(4.0)
+                            .child(note("Couldn't open your browser. Copy this address to browse releases:"))
+                            .child(text(RELEASES).font(type_::LABEL).color(t.text).wrap().selectable(true))))
+                        .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0))
+                    .child(row().w_full().gap(6.0).items_center()
+                        .child(link("browse-releases", "All releases").on_press_tx(open_releases))
+                        .child(el().grow(1.0))
+                        .children((!pending).then(|| if matches!(s.release_status, Status::Available(_)) {
+                            link("download-update", "Download update").fill(tok::accent(0, dark())).on_press_tx(open_download)
+                        } else { action })))
+                    .child(text("Checks include preview releases. Updates are installed manually.").font(type_::LABEL).color(t.text_secondary).wrap())
+            }))))
 }
 
 #[cfg(test)]
@@ -193,19 +202,38 @@ mod tests {
     }
 
     #[test]
-    fn update_panel_and_actions_fit_the_smallest_window() {
+    fn settings_panel_and_actions_fit_the_smallest_window() {
         let mut s = init();
         demo(&mut s);
-        s.release_panel = true;
         s.release_status = Status::Available(Release { version: Version::new(0, 1, 1), url: RELEASES.into() });
         let mut rt = rune::Runtime::new(s, view, (640.0, 400.0), rune::Env::new(true, 1.0));
         for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("theme")));
+        let control = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("settings-control")).unwrap().rect;
+        rt.pointer_down(control[0] + control[2] / 2.0, control[1] + control[3] / 2.0);
+        rt.pointer_up(control[0] + control[2] / 2.0, control[1] + control[3] / 2.0);
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        assert!(rt.state.settings_panel);
         let elements = rt.elements();
         let theme = elements.iter().find(|e| e.key.as_deref() == Some("theme")).unwrap();
-        let updates = elements.iter().find(|e| e.key.as_deref() == Some("updates-control")).unwrap();
-        assert!(updates.rect[0] < 68.0 && updates.rect[1] >= theme.rect[1] + theme.rect[3],
-            "update icon belongs in the rail below the theme button");
-        for key in ["updates-panel", "download-update", "close-updates"] {
+        let updates = elements.iter().find(|e| e.key.as_deref() == Some("settings-control")).unwrap();
+        assert!(updates.rect[0] < 68.0, "settings belongs in the rail");
+        let theme_rect = theme.rect;
+        let previous_theme = rt.state.theme;
+        rt.pointer_down(theme_rect[0] + 10.0, theme_rect[1] + 10.0);
+        rt.pointer_up(theme_rect[0] + 10.0, theme_rect[1] + 10.0);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.theme, next_theme(previous_theme));
+        assert!(rt.state.settings_panel, "theme changes keep settings open");
+        let panel = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("settings-panel")).unwrap().rect;
+        assert!((panel[0] + panel[2] / 2.0 - 320.0).abs() < 1.0);
+        assert!((panel[1] + panel[3] / 2.0 - 200.0).abs() < 1.0);
+        let updates_tab = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("settings-updates")).unwrap().rect;
+        rt.pointer_down(updates_tab[0] + 10.0, updates_tab[1] + 10.0);
+        rt.pointer_up(updates_tab[0] + 10.0, updates_tab[1] + 10.0);
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        assert!(rt.state.settings_updates);
+        for key in ["settings-panel", "download-update", "close-settings"] {
             let elements = rt.elements();
             let element = elements.iter().find(|e| e.key.as_deref() == Some(key)).expect(key);
             let [x, y, w, h] = element.rect;
@@ -214,8 +242,22 @@ mod tests {
         }
         rt.key(rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
         rt.frame(1.0 / 60.0);
-        assert!(!rt.state.release_panel, "Escape dismisses the panel");
+        assert!(!rt.state.settings_panel, "Escape dismisses the panel");
         assert!(matches!(rt.state.release_status, Status::Available(_)), "dismissal keeps the update available");
+    }
+
+    #[test]
+    fn settings_stays_centered_at_large_window_sizes() {
+        for (width, height) in [(1000.0, 680.0), (1920.0, 1080.0)] {
+            let mut s = init();
+            demo(&mut s);
+            s.settings_panel = true;
+            let mut rt = rune::Runtime::new(s, view, (width, height), rune::Env::new(true, 1.0));
+            for _ in 0..60 { rt.frame(1.0 / 60.0); }
+            let panel = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("settings-panel")).unwrap().rect;
+            assert!((panel[0] + panel[2] / 2.0 - width / 2.0).abs() < 1.0);
+            assert!((panel[1] + panel[3] / 2.0 - height / 2.0).abs() < 1.0);
+        }
     }
 
     #[test]

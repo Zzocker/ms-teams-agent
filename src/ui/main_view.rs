@@ -82,8 +82,9 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
     });
     // Top bar, not the sidebar: search will cover messages too, not just chat names.
     let search = row().w_full().gap(20.0).items_center().px(20.0).py(10.0).fill(t.card).border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
-        .child(text("Teams").font(rune::tok::TextStyle::new(18.0, 700.0)).color(t.text).w(180.0))
-        .child(col().key("search-box").w_full().max_w(560.0).shrink().px(12.0).py(6.0).radius(8.0).fill(t.bg)
+        .child(col().w(180.0).min_w(180.0).grow(1.0)
+            .child(text("Teams").font(rune::tok::TextStyle::new(18.0, 700.0)).color(t.text)))
+        .child(col().key("search-box").w_full().max_w(560.0).min_w(0.0).shrink().px(12.0).py(6.0).radius(8.0).fill(t.bg)
             .child(text_input(&s.search, type_::BODY).key("search").label("Search").color(t.text)
                 .placeholder("Search chats and channels", t.text_secondary)
                 .caret(t.text, tok::accent(0, dark()).alpha(0.3))
@@ -94,11 +95,11 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                     tx.blur();
                     true
                 })))
-        .child(el().grow(1.0))
-        .child(el().key("sign-out").role("button").label("Sign out").focusable(true)
-            .px(10.0).py(6.0).radius(6.0).hover(t.hover).cursor(rune::Cursor::Pointer).on_press(sign_out)
-            .child(text("Sign out").font(type_::LABEL).color(t.text_secondary)))
-        .child(user_avatar(s, &session.user.id, &session.user.name, 32.0));
+        .child(row().w(180.0).min_w(180.0).grow(1.0).gap(20.0).items_center().justify_end()
+            .child(el().key("sign-out").role("button").label("Sign out").focusable(true)
+                .px(10.0).py(6.0).radius(6.0).hover(t.hover).cursor(rune::Cursor::Pointer).on_press(sign_out)
+                .child(text("Sign out").font(type_::LABEL).color(t.text_secondary)))
+            .child(user_avatar(s, &session.user.id, &session.user.name, 32.0)));
     let search = col().key("search-area").w_full().child(search);
     let search = if query.is_empty() { search } else {
         search.modal_tx(true, |s: &mut State, tx| { s.search.clear(); tx.blur(); })
@@ -121,11 +122,13 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 _ => return false,
             };
             s.panel_width = panel_width(s.panel_width, delta);
+            settings::save(s);
             true
         })
         .on_drag(|s: &mut State, d: &mut Drag, _| {
             if d.phase == Phase::Down { d.data = s.panel_width; }
             s.panel_width = if d.cancelled() { d.data } else { panel_width(d.data, d.dx) };
+            if d.phase == Phase::Up && !d.cancelled() { settings::save(s); }
         })
         .child(el().w(1.0).h_full().fill(t.separator));
     static CHAT_ICON: rune::Icon = rune::Icon {
@@ -146,7 +149,6 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
                 .child(text(label).font(type_::LABEL).color(if s.show_teams == teams { brand } else { t.text_secondary }))
         }))
         .child(el().grow(1.0))
-        .child(theme_button(s.theme))
         .child(releases::nav_button(s));
 
     let pane = col().grow(1.0).shrink().h_full().min_w(0.0).min_h(0.0).fill(t.bg);
@@ -330,7 +332,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat]) -> El {
 }
 
 pub(crate) fn search_key(s: &mut State, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
-    if !matches!(s.screen, Screen::Main { .. }) || s.editor || s.viewer.is_some() || s.menu.is_some() || s.release_panel {
+    if !matches!(s.screen, Screen::Main { .. }) || s.editor || s.viewer.is_some() || s.menu.is_some() || s.settings_panel {
         return false;
     }
     if !rune::Keybind::new("ctrl+alt+e").matches_tx(e, tx) { return false }
@@ -395,12 +397,15 @@ mod tests {
     #[test]
     fn conversation_controls_fit_supported_sizes() {
         for dark in [false, true] {
-            for (width, height) in [(640.0, 400.0), (1000.0, 680.0), (1280.0, 800.0)] {
+            for (width, height) in [(640.0, 400.0), (1000.0, 680.0), (1280.0, 800.0), (1920.0, 1080.0)] {
                 let mut s = init();
                 message_states_demo(&mut s);
                 let mut rt = rune::Runtime::new(s, view, (width, height), rune::Env::new(dark, 1.0));
                 for _ in 0..60 { rt.frame(1.0 / 60.0); }
                 let elements = rt.elements();
+                let search = elements.iter().find(|e| e.key.as_deref() == Some("search-box")).unwrap();
+                assert!((search.rect[0] + search.rect[2] / 2.0 - width / 2.0).abs() < 1.0,
+                    "search must be centered at width {width}: {:?}", search.rect);
                 for key in ["search", "sign-out", "conversation-header", "draft", "editor", "send"] {
                     let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
                     let [x, y, w, h] = e.rect;

@@ -14,6 +14,7 @@ mod teams;
 mod notifications;
 mod message_state;
 mod releases;
+mod settings;
 mod ui;
 
 use actions::*;
@@ -42,7 +43,8 @@ struct State {
     message_state: message_state::MessageState,
     release_loader: Latest<Result<Option<releases::Release>, String>>,
     release_status: releases::Status,
-    release_panel: bool,
+    settings_panel: bool,
+    settings_updates: bool,
     release_checked_at: Option<chrono::DateTime<chrono::Local>>,
     release_open_error: bool,
     screen: Screen,
@@ -56,6 +58,7 @@ struct State {
     panel_width: f32,
     /// The picked theme: `None` follows the system, else dark or light.
     theme: Option<bool>,
+    settings_file: Option<std::path::PathBuf>,
     /// The picture open full-window, by preview URL; closed if it isn't in the open chat.
     #[cfg_attr(not(feature = "image"), allow(dead_code))]
     viewer: Option<String>,
@@ -137,7 +140,8 @@ fn init() -> State {
         message_state: Default::default(),
         release_loader: Latest::default(),
         release_status: releases::Status::Idle,
-        release_panel: false,
+        settings_panel: false,
+        settings_updates: false,
         release_checked_at: None,
         release_open_error: false,
         screen: Screen::Loading,
@@ -148,8 +152,9 @@ fn init() -> State {
         preview_rows: Default::default(),
         #[cfg(feature = "image")]
         preview_viewport: Live::new([0.0; 4]),
-        panel_width: 320.0,
+        panel_width: settings::DEFAULT_PANEL_WIDTH,
         theme: None,
+        settings_file: None,
         viewer: None,
         reply_target: None,
         reply_error: None,
@@ -508,6 +513,7 @@ fn main() {
     let handle = app.handle();
     app = app.init(move || {
         let mut s = init();
+        if desktop { settings::restore(&mut s); }
         s.window = Some(handle);
         s
     });

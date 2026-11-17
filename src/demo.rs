@@ -77,21 +77,21 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
         s.send_error = Some("Could not restore message: chat service 403 Forbidden".into());
     }),
 
-    ("updates", |s| { demo(s); s.release_panel = true; }),
+    ("updates", |s| { demo(s); s.settings_panel = true; s.settings_updates = true; }),
     ("updates-current", |s| {
-        demo(s); s.release_panel = true;
+        demo(s); s.settings_panel = true; s.settings_updates = true;
         s.release_status = releases::Status::Current;
         s.release_checked_at = Some(chrono::Local::now());
     }),
     ("updates-available", |s| {
-        demo(s); s.release_panel = true;
+        demo(s); s.settings_panel = true; s.settings_updates = true;
         s.release_status = releases::Status::Available(releases::Release {
             version: semver::Version::new(0, 1, 1),
             url: "https://github.com/Zzocker/ms-teams-agent/releases/tag/v0.1.1".into(),
         });
         s.release_checked_at = Some(chrono::Local::now());
     }),
-    ("updates-error", |s| { demo(s); s.release_panel = true; s.release_status = releases::Status::Failed; }),
+    ("updates-error", |s| { demo(s); s.settings_panel = true; s.settings_updates = true; s.release_status = releases::Status::Failed; }),
     ("reply", |s| {
         demo(s);
         if let Some(Ok(page)) = &mut s.messages {
