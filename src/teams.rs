@@ -84,6 +84,8 @@ pub struct Msg {
     pub edited: bool,
     pub deleted: bool,
     pub reply: Option<Reply>,
+    /// Root of a native channel thread, present only on its replies.
+    pub thread_root: Option<String>,
     /// Teams picture previews from [`ams_preview`] and public Giphy animation URLs.
     pub images: Vec<String>,
     /// Web links in `text`: byte ranges and their URLs, from [`html_to_rich`].
@@ -381,7 +383,7 @@ mod tests {
     fn read_marker_keeps_server_and_client_message_ids_separate() {
         let message = super::Msg {
             id: "client-123".into(), server_id: "101".into(), sender: "Other".into(), sender_id: String::new(),
-            text: "Hello".into(), time: String::new(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: vec![],
+            text: "Hello".into(), time: String::new(), mine: false, reply: None, thread_root: None, images: vec![], links: vec![], files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: vec![],
         };
         let marker = super::read_marker(&ReadHorizon::new(&message.server_id, &message.id).unwrap(), 999);
         assert_eq!(marker["consumptionhorizon"], "101;999;client-123");
@@ -405,7 +407,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_older_rows_and_swaps_the_sent_copy() {
-        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: vec![] };
+        let m = |id: &str, time: &str| Msg { id: id.into(), server_id: id.into(), sender: String::new(), sender_id: String::new(), text: id.into(), time: time.into(), mine: false, reply: None, thread_root: None, images: vec![], links: vec![], files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: vec![] };
         let old = Page { msgs: vec![m("a", "1"), m("b", "2"), m("c", "3"), m("sent", "9")], older: Some("before-a".into()) };
         let fresh = Page { msgs: vec![m("b", "2"), m("c", "3"), m("sent", "4")], older: Some("before-b".into()) };
         let p = merge(old, fresh);
@@ -416,7 +418,7 @@ mod tests {
     #[test]
     fn merge_keeps_push_messages_newer_than_a_fetch_in_flight() {
         let m = |id: &str| Msg { id:id.into(), server_id:id.into(), sender:String::new(), sender_id:String::new(),
-            text:id.into(), time:id.into(), mine:false, reply:None, images:vec![], links:vec![], files:vec![], raw:String::new(), mentions:vec![], edited:false, deleted:false, reactions:vec![] };
+            text:id.into(), time:id.into(), mine:false, reply:None, thread_root:None, images:vec![], links:vec![], files:vec![], raw:String::new(), mentions:vec![], edited:false, deleted:false, reactions:vec![] };
         let old = Page { msgs:vec![m("1"), m("3")], older:Some("older".into()) };
         let fetched = Page { msgs:vec![m("1"), m("2")], older:Some("older".into()) };
         assert_eq!(merge(old, fetched).msgs.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);

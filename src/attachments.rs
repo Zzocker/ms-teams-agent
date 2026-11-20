@@ -178,7 +178,7 @@ mod tests {
         open_chat(&mut s, "other-chat".into());
         assert!(s.attached.is_empty());
         s.attached.push(file);
-        navigate(&mut s, true);
+        open_chat(&mut s, "a".into());
         assert!(s.attached.is_empty());
     }
 

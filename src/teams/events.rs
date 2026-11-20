@@ -210,18 +210,22 @@ fn message_update(event: &Value, me: &User) -> Option<Update> {
     let id = link.split("/conversations/").nth(1)?.split('/').next()?;
     // The service supplies percent-encoded conversation links.
     let id = percent_decode(id)?;
+    let (chat_id, thread_root) = parse::channel_thread(&id).map_or((id.as_str(), None), |(channel, root)| (channel, Some(root)));
     if matches!(kind, "Control/Typing" | "Control/ClearTyping") {
         let user = avatar_id(r["from"].as_str()?);
         if user.is_empty() || user == me.id { return None; }
-        return Some(Update::Typing { chat: id, user, name: r["imdisplayname"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("Someone").into(), active: kind == "Control/Typing" });
+        return Some(Update::Typing { chat: chat_id.to_owned(), user, name: r["imdisplayname"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("Someone").into(), active: kind == "Control/Typing" });
     }
     if kind != "Text" && !kind.starts_with("RichText") { return None; }
-    let wrapper = serde_json::json!({"conversations":[{"id":id,"lastMessage":r,
+    let wrapper = serde_json::json!({"conversations":[{"id":chat_id,"lastMessage":r,
         "threadProperties": r.get("threadProperties").or_else(|| r.get("properties"))}]});
     let mut chat = parse_conversations(&wrapper, me).pop()?;
     chat.unread = !r["from"].as_str().is_some_and(|from| from.ends_with(&me.id));
-    let message = parse_messages(&serde_json::json!({"messages":[r]}), &me.id).pop();
+    let mut message = parse_messages(&serde_json::json!({"messages":[r]}), &me.id).pop();
     let server_id = r["id"].as_str()?.to_owned();
+    if let Some(message) = &mut message && message.thread_root.is_none() {
+        message.thread_root = thread_root.and_then(|root| parse::thread_root_id(root, &server_id, &message.id));
+    }
     Some(Update::Message { chat, message, server_id, new })
 }
 
@@ -294,9 +298,11 @@ mod tests {
                 "id":"1", "conversationLink":format!("https://service/conversations/{}", encode(id)),
                 "messagetype":"Text", "content":"hello", "properties":properties
             }});
-            let Some(Update::Message { chat, .. }) = message_update(&event, &User::default()) else { panic!() };
-            assert_eq!(chat.id, id);
+            let Some(Update::Message { chat, message: Some(message), .. }) = message_update(&event, &User::default()) else { panic!() };
+            let (channel_id, root) = id.split_once(";messageid=").map_or((id, None), |(channel, root)| (channel, Some(root)));
+            assert_eq!(chat.id, channel_id);
             assert_eq!(chat.channel, channel);
+            assert_eq!(message.thread_root.as_deref(), root);
         }
     }
     #[test]

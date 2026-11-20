@@ -33,7 +33,7 @@ pub(crate) fn message_reactions(s: &State, m: &Msg) -> Option<El> {
 
 /// The hover toolbar of a message the server has (its actions need its id): edit for one of
 /// mine, quote (reply) for someone else's, and "…" for the rest. It stays shown while its menu is open.
-pub(crate) fn message_actions(m: &Msg, shown: bool) -> Option<El> {
+pub(crate) fn message_actions(m: &Msg, shown: bool, quote_in_toolbar: bool) -> Option<El> {
     static PENCIL: rune::Icon = rune::Icon { name: "msg-edit", view: 20.0, body: r#"<path d="M13.5 3.5l3 3L7 16H4v-3z M11.5 5.5l3 3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
     static QUOTE: rune::Icon = rune::Icon { name: "msg-quote", view: 20.0, body: r#"<path d="M4 11.5c0-3 1.5-5 4-5.5 M4 11.5h3.5v3.5H4z M11 11.5c0-3 1.5-5 4-5.5 M11 11.5h3.5v3.5H11z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"# };
     static MORE: rune::Icon = rune::Icon { name: "msg-more", view: 20.0, body: r#"<circle cx="5" cy="10" r="1.3" fill="currentColor"/><circle cx="10" cy="10" r="1.3" fill="currentColor"/><circle cx="15" cy="10" r="1.3" fill="currentColor"/>"# };
@@ -42,14 +42,14 @@ pub(crate) fn message_actions(m: &Msg, shown: bool) -> Option<El> {
     let button = |key: String, label: &'static str, icon: &'static rune::Icon| el().key(key).size(28.0, 28.0).center().radius(6.0)
         .role("button").label(label).focusable(true).cursor(rune::Cursor::Pointer).hover(t.hover)
         .child(rune::icon(icon, 16.0).color(t.text));
-    let first = {
+    let first = (m.mine || quote_in_toolbar).then(|| {
         let m = m.clone();
         if m.mine {
             button(format!("edit/{}", m.id), "Edit message", &PENCIL).on_press(move |s: &mut State| start_edit(s, &m))
         } else {
             button(format!("quote/{}", m.id), "Reply", &QUOTE).on_press(move |s: &mut State| start_reply(s, &m))
         }
-    };
+    });
     let id = m.id.clone();
     let more = button(format!("more/{}", m.id), "More options", &MORE)
         .hover(t.hover)
@@ -59,7 +59,25 @@ pub(crate) fn message_actions(m: &Msg, shown: bool) -> Option<El> {
         // Shown for the hovered message (or its open menu); a hovered group without it is the row
         // above the pointer, which the toolbar of the one below overlaps.
         .group_opacity(if shown { 1.0 } else { 0.0 }, if shown { 1.0 } else { 0.0 })
-        .child(first).child(more))
+        .children(first).child(more))
+}
+
+pub(crate) fn channel_quote_button(m: &Msg, brand: rune::Color, post_footer: bool) -> Option<El> {
+    if m.server_id.is_empty() || m.deleted { return None; }
+    let t = tok::theme(dark());
+    let message = m.clone();
+    let button = el().key(format!("post-quote/{}", m.id)).role("button").label("Reply with quote").focusable(true)
+        .cursor(rune::Cursor::Pointer).hover(t.hover).px(8.0).min_h(if post_footer { 32.0 } else { 28.0 }).center().radius(5.0)
+        .on_press_tx(move |s: &mut State, tx| {
+            start_reply(s, &message);
+            tx.focus("draft", false);
+        })
+        .child(text("Reply with quote").font(type_::LABEL).color(brand));
+    Some(if post_footer {
+        row().w_full().px(14.0).py(5.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator).child(button)
+    } else {
+        row().w_full().child(button)
+    })
 }
 
 /// The open "…" menu, under its button: copy, plus reply, edit and delete for one of mine
@@ -113,11 +131,12 @@ pub(crate) fn message_text(m: &Msg) -> El {
         // As the draft's preview showed it.
         let md = markdown::parse(&m.text);
         let links: Vec<_> = m.links.iter().map(|(r, url)| (md.at(r.start)..md.at(r.end), url)).filter(|(r, _)| !r.is_empty()).collect();
-        let spans = md_spans(&md);
+        let mut spans = md_spans(&md);
+        spans.extend(mention_spans(m, |i| md.at(i)));
         (md.text, links, spans)
     };
     #[cfg(not(feature = "markdown"))]
-    let (text, links, mut spans) = (m.text.clone(), m.links.iter().map(|(r, url)| (r.clone(), url)).collect::<Vec<_>>(), vec![]);
+    let (text, links, mut spans) = (m.text.clone(), m.links.iter().map(|(r, url)| (r.clone(), url)).collect::<Vec<_>>(), mention_spans(m, |i| i));
     spans.extend(links.iter().map(|(r, _)| rune::Span::new(r.start, r.end).color(link)));
     links.iter().fold(rune::rich(text, spans), |el, (r, url)| {
         el.link(rune::Link::new(r.clone(), url.as_str()).hover(rune::LinkPaint::new().underline(link)).help(url.as_str()))
@@ -126,6 +145,16 @@ pub(crate) fn message_text(m: &Msg) -> El {
         .font(type_::BODY).color(t.text).wrap_anywhere().selectable(true)
         .selection_style(rune::SelectionStyle::chromium())
         .on_link(|_: &mut State, url: &str, tx: &mut Tx| { let _ = tx.open_url(url); })
+}
+
+/// Mentions retain their source ranges even when Markdown removes formatting markers.
+fn mention_spans(m: &Msg, at: impl Fn(usize) -> usize) -> Vec<rune::Span> {
+    let accent = tok::accent(0, dark());
+    m.mentions.iter().filter(|mention| m.text.get(mention.range.clone()).is_some())
+        .map(|mention| at(mention.range.start)..at(mention.range.end))
+        .filter(|range| !range.is_empty())
+        .map(|range| rune::Span::new(range.start, range.end).bold().color(accent).bg(accent.alpha(0.15), 2.0))
+        .collect()
 }
 
 #[cfg(feature = "markdown")]
@@ -145,6 +174,29 @@ pub(crate) fn md_spans(md: &markdown::Md) -> Vec<rune::Span> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_are_highlighted_without_styling_plain_names_or_losing_ranges() {
+        let mut s = init();
+        crate::demo::mention_demo(&mut s);
+        let m = &s.messages.as_ref().unwrap().as_ref().unwrap().msgs[0];
+        let spans = mention_spans(m, |i| i);
+        assert_eq!(spans.len(), 2);
+        for (span, mention) in spans.iter().zip(&m.mentions) {
+            assert_eq!(span.start as usize..span.end as usize, mention.range);
+            assert_eq!(span.weight, Some(600.0));
+            assert!(span.color.is_some() && span.bg.is_some());
+        }
+        #[cfg(feature = "markdown")]
+        {
+            let md = markdown::parse(&m.text);
+            let spans = mention_spans(m, |i| md.at(i));
+            let labels: Vec<_> = spans.iter().map(|s| &md.text[s.start as usize..s.end as usize]).collect();
+            assert_eq!(labels, ["Ada Lovelace", "Mary Somerville"]);
+            assert!(spans[0].start < m.mentions[0].range.start as u32);
+        }
+        assert_eq!(copy_text(m), m.text);
+    }
 
     #[test]
     fn copy_menu_expands_shortened_urls_and_pastes_the_full_message() {

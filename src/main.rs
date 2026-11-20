@@ -67,7 +67,10 @@ struct State {
     reply_error: Option<String>,
     reply_highlight: Option<(String, std::time::Instant)>,
     reply_highlight_on: bool,
-    show_teams: bool,
+    conversation_section: ConversationSection,
+    unread_only: bool,
+    sidebar_hidden: bool,
+    favorites: settings::Favorites,
     teams: Option<Result<Vec<teams::Team>, String>>,
     pending_channels: Vec<Chat>,
     teams_loader: Latest<Result<Vec<teams::Team>, String>>,
@@ -163,7 +166,10 @@ fn init() -> State {
         reply_error: None,
         reply_highlight: None,
         reply_highlight_on: false,
-        show_teams: false,
+        conversation_section: ConversationSection::Chat,
+        unread_only: false,
+        sidebar_hidden: false,
+        favorites: Default::default(),
         teams: None,
         teams_loader: Latest::default(),
         pending_channels: Vec::new(),
@@ -281,6 +287,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                 s.prefetch_queue = chats.iter().take(10).map(|c| c.id.clone()).collect();
             }
             s.screen = screen;
+            load_teams(s);
         }
         changed = true;
     }
@@ -494,7 +501,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 s.screen = Screen::Login(None);
             })),
         // Over the chat, not instead of it, so closing it leaves the messages scrolled where they were.
-        Screen::Main { session, chats } => main_view(s, session, chats)
+        Screen::Main { session, chats } => main_view(s, session, chats, cx)
             .children(image_viewer(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))))
             .children(draft_editor(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))))
             .children(message_menu(s)),
@@ -518,7 +525,7 @@ fn main() {
         on_key: Some(search_key),
         min_size: Some((640.0, 400.0)),
         families: ("Inter", "ui-monospace"),
-        ..AppSpec::new("Teams", (1000.0, 680.0), init, view)
+        ..AppSpec::new("Teams Agent", (1000.0, 680.0), init, view)
     }).on_focus(notifications::focus).on_visibility(notifications::visibility).on_rest(rest)
         .on_close(|s, _| { s.window_visible = false; s.window_focused = false; })
         .on_quit(|s, _| { s.attempt.fetch_add(1, SeqCst); });

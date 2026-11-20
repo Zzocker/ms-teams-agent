@@ -4,7 +4,7 @@ use crate::*;
 
 pub(crate) fn demo(s: &mut State) {
     let chat = |id: &str, title: &str, preview: &str, time: &str| Chat { id: id.into(), channel: false, title: title.into(), avatar_id: String::new(), avatar_members: Vec::new(), preview: preview.into(), time: time.into(), unread: id == "b", latest: None };
-    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, images: vec![], links: vec![], files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: vec![] };
+    let msg = |sender: &str, text: &str, time: &str, mine| Msg { id: time.into(), server_id: time.into(), sender: sender.into(), sender_id: String::new(), text: text.into(), time: time.into(), mine, reply: None, thread_root: None, images: vec![], links: vec![], files: vec![], raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: vec![] };
     s.screen = Screen::Main {
         session: Arc::new(Session {
             user: auth::User { name: "Ada Lovelace".into(), email: "ada@example.com".into(), id: "me".into() },
@@ -64,6 +64,7 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
     ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
     ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
     ("main", demo),
+    ("mentions", mention_demo),
     ("conversation-empty", |s| { demo(s); s.selected = None; s.messages = None; }),
     ("conversation-error", |s| { demo(s); s.messages = Some(Err("Check your connection and try again.".into())); }),
     ("conversation-loading", |s| { demo(s); s.messages = None; }),
@@ -155,24 +156,13 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
         image_demo(s);
         s.viewer = Some(IMAGE_DEMO.into());
     }),
+    ("workspace", workspace_demo),
+    ("channel-posts", channel_posts_demo),
     ("teams", |s| {
-        demo(s);
-        s.show_teams = true;
+        workspace_demo(s);
+        s.conversation_section = ConversationSection::Teams;
         s.selected = None;
         s.messages = None;
-        let channel = |id: &str, title: &str| Chat {
-            channel: true,
-            avatar_id: String::new(), avatar_members: Vec::new(),
-            id: id.into(), title: title.into(), preview: String::new(), time: String::new(), unread: false, latest: None,
-        };
-        s.teams = Some(Ok(vec![
-            teams::Team { id: "development".into(), title: "Development".into(), channels: vec![
-                channel("backend", "Backend"), channel("mobile", "Mobile application"), channel("notifications", "Notifications"),
-            ] },
-            teams::Team { id: "trential".into(), title: "Trential".into(), channels: vec![
-                channel("general", "General"), channel("announcements", "Announcements"), channel("random", "Random"),
-            ] },
-        ]));
     }),
     ("loading", |s| {
         demo(s);
@@ -188,6 +178,57 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
     }),
 ];
 
+/// Chats, teams and a saved favorite for local previews.
+pub(crate) fn workspace_demo(s: &mut State) {
+    demo(s);
+    s.favorites.entry("me".into()).or_default().insert("a".into());
+    let channel = |id: &str, title: &str| Chat {
+        channel: true,
+        avatar_id: String::new(), avatar_members: Vec::new(),
+        id: id.into(), title: title.into(), preview: String::new(), time: String::new(), unread: false, latest: None,
+    };
+    s.teams = Some(Ok(vec![
+        teams::Team { id: "development".into(), title: "Development".into(), channels: vec![
+            channel("backend", "Backend"), channel("mobile", "Mobile application"), channel("notifications", "Notifications"),
+        ] },
+        teams::Team { id: "trential".into(), title: "Trential".into(), channels: vec![
+            channel("general", "General"), channel("announcements", "Announcements"), channel("random", "Random"),
+        ] },
+    ]));
+    s.collapsed_teams.insert("trential".into());
+}
+
+/// Sample channel posts, including an outgoing post and a message with a quote.
+pub(crate) fn channel_posts_demo(s: &mut State) {
+    workspace_demo(s);
+    s.conversation_section = ConversationSection::Teams;
+    s.selected = Some("backend".into());
+    s.messages = Some(Ok(Page {
+        older: None,
+        msgs: teams::parse_messages(&serde_json::json!({"messages": [
+            {"id":"100", "clientmessageid":"channel-opening", "from":"8:orgid:charles", "imdisplayname":"Charles Babbage",
+             "composetime":"2026-11-20T08:40:00Z", "messagetype":"RichText/Html",
+             "content":"<p>The staging rollout is scheduled for Thursday. Please flag any migrations that need a second review.</p>"},
+            {"id":"101", "rootMessageId":"101", "clientmessageid":"channel-update", "from":"8:orgid:me", "imdisplayname":"Ada Lovelace",
+             "composetime":"2026-11-20T09:05:00Z", "messagetype":"RichText/Html",
+             "content":"<p>The schema and rollback checks passed. I’ll post the final checklist after the review.</p>"},
+            {"id":"102", "rootMessageId":"101", "clientmessageid":"channel-review", "from":"8:orgid:mary", "imdisplayname":"Mary Somerville",
+             "composetime":"2026-11-20T09:21:00Z", "messagetype":"RichText/Html",
+             "content":"<p>I can review the checklist this afternoon. Could you share it here once it’s ready?</p>"},
+            {"id":"103", "clientmessageid":"channel-confirm", "from":"8:orgid:charles", "imdisplayname":"Charles Babbage",
+             "composetime":"2026-11-20T09:31:00Z", "messagetype":"RichText/Html",
+             "content":"<p>I’ll share the checklist here after the review.</p>"}
+        ]}), "me"),
+    }));
+    if let Some(Ok(page)) = &mut s.messages {
+        let quoted = &page.msgs[2];
+        page.msgs[3].reply = Some(teams::Reply {
+            id: quoted.server_id.clone(), sender: quoted.sender.clone(), sender_id: quoted.sender_id.clone(),
+            time: quoted.time.clone(), text: quoted.text.clone(),
+        });
+    }
+}
+
 /// Synthetic service-shaped data; no account, credentials, or network.
 pub(crate) fn message_states_demo(s: &mut State) {
     demo(s);
@@ -198,4 +239,17 @@ pub(crate) fn message_states_demo(s: &mut State) {
     s.message_state.receipt_chat = Some("a".into());
     s.message_state.seen.insert("charles".into(), 101);
     s.message_state.typing("a".into(), "charles".into(), "Charles Babbage".into(), true);
+}
+
+/// Service-shaped mentions alongside a plain name, Unicode, formatting and a web link.
+pub(crate) fn mention_demo(s: &mut State) {
+    demo(s);
+    s.messages = Some(Ok(Page { older: None, msgs: teams::parse_messages(&serde_json::json!({"messages":[
+        {"id":"100", "from":"8:orgid:charles", "imdisplayname":"Charles Babbage", "composetime":"2026-11-17T10:20:00Z", "messagetype":"RichText/Html",
+         "content": "<p>**Review** — 你好 <span itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">Ada Lovelace</span> and <span itemtype=\"http://schema.skype.com/Mention\" itemid=\"1\">Mary Somerville</span>, please check the <a href=\"https://example.com/notes\">engine notes</a>.<br>Ada Lovelace here is ordinary text.</p>",
+         "properties":{"mentions":serde_json::json!([
+             {"itemid":"0", "mri":"8:orgid:11111111-2222-3333-4444-555555555555"},
+             {"itemid":"1", "mri":"8:orgid:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+         ]).to_string()}}
+    ]}), "me") }));
 }

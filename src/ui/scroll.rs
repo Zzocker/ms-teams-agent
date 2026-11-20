@@ -132,9 +132,9 @@ mod tests {
 
     #[test]
     fn cached_chats_restore_independent_reading_positions() {
-        fn view(s: &State, _: &mut Cx<State>) -> El {
+        fn view(s: &State, cx: &mut Cx<State>) -> El {
             let Screen::Main { session, chats } = &s.screen else { unreachable!() };
-            main_view(s, session, chats)
+            main_view(s, session, chats, cx)
         }
         let mut s = init();
         demo(&mut s);
@@ -185,12 +185,9 @@ mod tests {
         assert!((rt.state.msg_bar.at.get().offset[1] - 300.0).abs() < 1.0);
         rt.update(|_, tx| tx.scroll_to_bottom_instant("messages"));
         rt.frame(1.0 / 60.0);
-        rt.update(|s, _| navigate(s, true));
+        rt.update(|s, _| open_chat(s, "b".into()));
         rt.frame(1.0 / 60.0);
-        rt.update(|s, _| {
-            navigate(s, false);
-            open_chat(s, "a".into());
-        });
+        rt.update(|s, _| open_chat(s, "a".into()));
         for _ in 0..120 { rt.frame(1.0 / 60.0); }
         let at = rt.state.msg_bar.at.get();
         assert!((at.max[1] - at.offset[1]).abs() < 1.0, "saved bottom position stays at bottom");

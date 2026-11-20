@@ -6,9 +6,23 @@ On first start it shows a device code and opens the Microsoft sign-in page. Sign
 
 Optional environment variables: `TEAMS_TENANT` (default `organizations`), `TEAMS_CLIENT_ID`.
 
-Use **Chat** in the left rail for chats, or **Teams** for teams and their channels.
-Click a team to expand or collapse its channels. Teams load separately when first opened;
-failed requests show an error and a Retry button. Favorites are not shown.
+Use **Chat** or **Teams** in the left rail. In Chat, choose **Chats** or **Unread**.
+In Teams, choose **Channels** or **Unread**. Switching views or filters keeps the open
+conversation and draft. Click a team to expand its channels. If loading fails, use
+**Reload channels**.
+
+Open a channel to see its **Posts**. Native Teams replies and quoted replies appear
+under the original post when it’s loaded. If the original post is older, use the quote
+or **Go to original post** to find it. Choose **Reply with quote** to quote a message in
+your response.
+
+Use the star in the conversation header to add or remove a favorite. Favorites are saved
+on this device for your signed-in account. The sidebar button next to **Teams Agent**
+hides or shows the list. Drag its right edge, or focus the divider and press Left or Right,
+to resize it.
+
+Press **Ctrl+E** to focus search. Search matches chat, team, and channel names across
+sidebar filters. Press Enter to open the first result or Escape to dismiss the list.
 
 New chat messages arrive over a persistent Teams WebSocket connection, with automatic reconnects
 and session renewal. The chat moves to the top of the list. If you are viewing it in the focused
@@ -38,7 +52,7 @@ Attachments can be added to new messages and replies, rather than edits of sent 
 Chat attachments are uploaded to your OneDrive's **Microsoft Teams Chat Files** folder
 and shared with the other chat members using read access, without sharing-notification emails.
 File cards open in the browser, including the official Teams client's file cards.
-Channel file uploads are not supported yet and show an error instead of sending an unusable card.
+The file picker is available in chats. Channel posts can include pasted images.
 Attachments sent by the earlier media-store implementation must be resent to appear in official Teams.
 Those older cards can still be downloaded through this app's Save dialog.
 On Linux, the native file picker requires an XDG desktop portal with a FileChooser backend.
