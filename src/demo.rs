@@ -172,6 +172,16 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
         demo(s);
         s.search = TextEdit::new("char");
     }),
+    ("search-preview", |s| {
+        demo(s);
+        s.search = TextEdit::new("gears");
+        message_search::preview_changed(s, &mut Tx::default());
+    }),
+    ("message-search", |s| {
+        demo(s);
+        s.search = TextEdit::new("engine");
+        message_search::open_global(s, &mut Tx::default());
+    }),
     ("pick", |s| {
         demo(s);
         (s.selected, s.messages) = (None, None);

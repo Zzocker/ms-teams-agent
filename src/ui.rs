@@ -6,6 +6,7 @@ mod main_view;
 mod media;
 mod message;
 mod scroll;
+mod search;
 mod time;
 mod widgets;
 

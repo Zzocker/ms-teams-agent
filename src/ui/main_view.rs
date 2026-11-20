@@ -25,7 +25,7 @@ static CHANNEL_ICON: rune::Icon = rune::Icon {
     body: r#"<path d="m10 3-4 18 M18 3l-4 18 M4 9h17 M2 15h17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>"#,
 };
 
-static SEARCH_ICON: rune::Icon = rune::Icon {
+pub(super) static SEARCH_ICON: rune::Icon = rune::Icon {
     name: "nav-search", view: 24.0,
     body: r#"<circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
 };
@@ -42,7 +42,7 @@ static STAR_FILLED: rune::Icon = rune::Icon {
 };
 
 fn select_conversation(s: &mut State, id: &str) {
-    s.search.clear();
+    message_search::clear_top(s);
     reveal_conversation(s, id);
     if s.selected.as_deref() != Some(id) {
         open_chat(s, id.to_owned());
@@ -70,11 +70,15 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
         .chain(team_channels.iter().copied()).chain(other_channels.iter().map(|&chat| (chat, None))).collect();
     let active = s.selected.as_ref().and_then(|id| conversations.iter().copied().find(|(chat, _)| &chat.id == id));
     let now = chrono::Local::now();
-    let chat_row = |c: &Chat, key: &str, detail: Option<&str>, indent: f32| {
+    let chat_row = |c: &Chat, key: &str, detail: Option<&str>, indent: f32, words: &[&str]| {
         let id = c.id.clone();
         let picked = s.selected.as_ref() == Some(&c.id);
         let title_font = rune::TextStyle::new(13.0, if c.unread { 700.0 } else { 500.0 });
         let caption = detail.unwrap_or(&c.preview);
+        let highlight = |node: El, value: &str| {
+            if words.is_empty() { return node; }
+            node.spans(super::search::match_spans(message_search::matching_ranges(value, words)))
+        };
         let label = match (detail, c.unread) {
             (Some(team), true) => format!("{}, {team}, unread messages", c.title),
             (Some(team), false) => format!("{}, {team}", c.title),
@@ -92,10 +96,10 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
             } else { chat_avatar(s, c, &session.user.id, 30.0) })
             .child(col().gap(2.0).grow(1.0).min_w(0.0)
                 .child(row().w_full().gap(6.0).items_center()
-                    .child(text(c.title.as_str()).font(title_font).color(t.text).truncate()
-                        .help_when_truncated(c.title.as_str()).grow(1.0).min_w(0.0))
+                    .child(highlight(text(c.title.as_str()).font(title_font).color(t.text).truncate()
+                        .help_when_truncated(c.title.as_str()).grow(1.0).min_w(0.0), &c.title))
                     .children((!c.time.is_empty()).then(|| note(&chat_time(&c.time, now)).font(type_::LABEL))))
-                .children((!caption.is_empty()).then(|| note(caption).font(type_::LABEL).truncate())))
+                .children((!caption.is_empty()).then(|| highlight(note(caption).font(type_::LABEL).truncate(), caption))))
     };
 
     let section = |label: &str| note(label).font(rune::TextStyle::new(12.0, 650.0)).px(12.0).pt(12.0).pb(4.0);
@@ -103,13 +107,13 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
     let mut rows = Vec::new();
     if !favorites.is_empty() {
         rows.push(section("Favorites"));
-        rows.extend(favorites.into_iter().map(|(c, team)| chat_row(c, "favorite", *team, 0.0)));
+        rows.extend(favorites.into_iter().map(|(c, team)| chat_row(c, "favorite", *team, 0.0, &[])));
     }
 
     let mut has_matches = conversations.iter().any(|(c, _)| matches_filter(c));
     if !show_teams {
         let chats = visible_chats.iter().filter(|c| matches_filter(c) && !is_favorite(&c.id));
-        let chat_rows: Vec<_> = chats.map(|c| chat_row(c, "chat", None, 0.0)).collect();
+        let chat_rows: Vec<_> = chats.map(|c| chat_row(c, "chat", None, 0.0, &[])).collect();
         if !chat_rows.is_empty() {
             rows.push(section("Chats"));
             rows.extend(chat_rows);
@@ -136,11 +140,11 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
                     .color(t.text).truncate().min_w(0.0)));
             if !collapsed {
                 if channels.is_empty() { channel_rows.push(note("No channels").px(32.0).py(6.0)); }
-                channel_rows.extend(channels.into_iter().map(|c| chat_row(c, "channel", None, 20.0)));
+                channel_rows.extend(channels.into_iter().map(|c| chat_row(c, "channel", None, 20.0, &[])));
             }
         }
         channel_rows.extend(other_channels.iter().filter(|c| matches_filter(c) && !is_favorite(&c.id))
-            .map(|c| chat_row(c, "channel", None, 0.0)));
+            .map(|c| chat_row(c, "channel", None, 0.0, &[])));
         match &s.teams {
             None if s.teams_loader.is_pending() => {
                 has_matches = true;
@@ -171,35 +175,53 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
     }
 
     let query = s.search.text.trim().to_lowercase();
+    let words: Vec<_> = query.split_whitespace().collect();
     let hits: Vec<_> = if query.is_empty() { Vec::new() } else {
-        let words: Vec<_> = query.split_whitespace().collect();
         conversations.iter().copied().filter(|(c, team)| {
             let title = c.title.to_lowercase();
             let team = team.unwrap_or_default().to_lowercase();
             words.iter().all(|word| title.contains(word) || team.contains(word))
         }).collect()
     };
-    let first_hit = hits.first().map(|(c, _)| c.id.clone());
-    let results = (!query.is_empty()).then(|| {
+    let message_hits = s.search_preview.results(&query);
+    let preview_pending = s.search_preview.pending(&query);
+    let first_suggestion = hits.first().map(|(chat, _)| format!("hit/{}", chat.id))
+        .or_else(|| message_hits.first().map(super::search::preview_key));
+    let results = (!hits.is_empty() || !message_hits.is_empty() || preview_pending).then(|| {
         col().key("results").w(540.0).max_h(420.0).shrink().min_h(0.0).padding(6.0).gap(2.0).radius(10.0).fill(sidebar_surface)
             .border(1.0, t.separator)
             .anchored_fit("search-box", Side::Bottom, Align::Start, 4.0)
-            .child(section("Conversations").pt(4.0))
-            .children(hits.is_empty().then(|| note("No matching chats or channels.").px(12.0).py(8.0)))
-            .child(col().w_full().gap(2.0)
-                .children(hits.iter().map(|(c, team)| chat_row(c, "hit", team.or(Some(if c.channel { "Channel" } else { "Chat" })), 0.0)))
+            .child(col().w_full().gap(2.0).role("list").label("Search suggestions").focus_group()
+                .children((!hits.is_empty()).then(|| section("Chats and channels").pt(4.0)))
+                .children(hits.iter().map(|(c, team)| chat_row(c, "hit", team.or(Some(if c.channel { "Channel" } else { "Chat" })), 0.0, &words)))
+                .children((!message_hits.is_empty() || preview_pending).then(|| section("Recent messages")))
+                .children(message_hits.iter().map(|hit| super::search::preview_row(hit, &conversations)))
+                .children((preview_pending && message_hits.is_empty()).then(|| {
+                    note("Searching messages…").role("status").px(12.0).py(8.0)
+                }))
                 .scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0))
     });
-    let toggle_sidebar = if s.sidebar_hidden || s.panel_width == 0.0 { "Show conversations" } else { "Hide conversations" };
+    let scoped_search_open = s.message_search.open && s.message_search.scope.is_some();
+    let global_search_open = s.message_search.open && s.message_search.scope.is_none();
+    let search_width = if scoped_search_open { super::search::PANEL_WIDTH } else { 0.0 };
+    let available_sidebar_width = cx.layout_with("workspace", move |rect| {
+        (rect[2] - RAIL_WIDTH - 350.0 - search_width).clamp(0.0, PANEL_MAX)
+    }).unwrap_or(230.0);
+    let compact_search = cx.layout_with("workspace", |rect| rect[2] < 700.0).unwrap_or(false);
+    let search_occupies_sidebar = scoped_search_open && available_sidebar_width < 172.0;
+    let show_sidebar = !s.sidebar_hidden && !search_occupies_sidebar;
+    let show_conversations = !show_sidebar || s.panel_width == 0.0;
+    let toggle_sidebar = if show_conversations { "Show conversations" } else { "Hide conversations" };
     let search = row().w_full().gap(12.0).items_center().px(16.0).py(8.0).fill(t.card)
         .border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
         .child(row().w(164.0).min_w(164.0).grow(1.0).gap(8.0).items_center()
             .child(el().key("toggle-sidebar").size(36.0, 36.0).center().radius(7.0)
                 .role("button").label(toggle_sidebar).help(toggle_sidebar).focusable(true)
                 .hover(t.hover).cursor(rune::Cursor::Pointer)
-                .on_press(|s: &mut State| {
-                    if s.panel_width == 0.0 { s.panel_width = settings::DEFAULT_PANEL_WIDTH; s.sidebar_hidden = false; }
-                    else { s.sidebar_hidden = !s.sidebar_hidden; }
+                .on_press(move |s: &mut State| {
+                    if search_occupies_sidebar { s.message_search.close(); }
+                    if s.panel_width == 0.0 { s.panel_width = settings::DEFAULT_PANEL_WIDTH; }
+                    s.sidebar_hidden = !show_conversations;
                 })
                 .child(rune::icon(&SIDEBAR_ICON, 20.0).color(t.text_secondary)))
             .child(text("Teams Agent").font(rune::TextStyle::new(16.0, 700.0)).color(t.text)))
@@ -207,25 +229,29 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
             .px(10.0).py(5.0).radius(8.0).fill(t.bg).border(1.0, t.separator)
             .child(rune::icon(&SEARCH_ICON, 17.0).color(t.text_secondary))
             .child(text_input(&s.search, type_::BODY).key("search").grow(1.0).min_w(0.0)
-                .label("Search chats and channels").color(t.text)
-                .placeholder("Search chats and channels", t.text_secondary)
+                .label("Search messages, chats, and channels").color(t.text)
+                .placeholder("Search messages, chats, and channels", t.text_secondary)
                 .caret(t.text, brand.alpha(0.3))
                 .on_edit(|s: &mut State| &mut s.search)
-                .on_submit(move |s: &mut State, tx| {
-                    if let Some(id) = &first_hit {
-                        select_conversation(s, id);
-                        tx.focus("draft", false);
+                .on_input_change(message_search::preview_changed)
+                .on_submit(message_search::open_global)
+                .on_input_key(move |s: &mut State, e: &rune::KeyEvent, tx| {
+                    match e.key {
+                        rune::Key::Escape => {
+                            message_search::clear_top(s);
+                            tx.blur();
+                            true
+                        }
+                        rune::Key::Down if e.mods == rune::Mods::default() && let Some(key) = &first_suggestion => {
+                            tx.focus(key.as_str(), true);
+                            true
+                        }
+                        _ => false,
                     }
-                })
-                .on_key(|s: &mut State, e: &rune::KeyEvent, tx| {
-                    if e.key != rune::Key::Escape { return false }
-                    s.search.clear();
-                    tx.blur();
-                    true
                 }))
             .children((!query.is_empty()).then(|| el().key("clear-search").role("button").label("Clear search").focusable(true)
                 .px(6.0).py(4.0).radius(4.0).hover(t.hover).cursor(rune::Cursor::Pointer)
-                .on_press_tx(|s: &mut State, tx| { s.search.clear(); tx.focus("search", false); })
+                .on_press_tx(|s: &mut State, tx| { message_search::clear_top(s); tx.focus("search", false); })
                 .child(note("Clear").font(type_::LABEL)))))
         .child(row().w(164.0).min_w(164.0).grow(1.0).gap(6.0).items_center().justify_end()
             .child(releases::nav_button(s))
@@ -235,11 +261,9 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
             .child(user_avatar(s, &session.user.id, &session.user.name, 30.0)));
     let search = col().key("search-area").w_full().child(search);
     let search = if query.is_empty() { search } else {
-        search.modal_tx(true, |s: &mut State, tx| { s.search.clear(); tx.blur(); })
+        search.modal_tx(true, |s: &mut State, tx| { message_search::clear_top(s); tx.blur(); })
     };
 
-    let available_sidebar_width = cx.layout_with("workspace", |rect| (rect[2] - RAIL_WIDTH - 350.0).clamp(0.0, PANEL_MAX))
-        .unwrap_or(230.0);
     let sidebar_width = s.panel_width.min(available_sidebar_width);
     let list = with_bar("chats", col().w_full().gap(2.0).px(6.0).pb(12.0).children(rows)
         .scroll(ScrollSpec { stick_bottom: false }).grow(1.0).min_h(0.0), &s.chat_bar);
@@ -320,6 +344,12 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
                 .on_press(move |s: &mut State| settings::toggle_favorite(s, &favorite_id))
                 .child(rune::icon(if favorite { &STAR_FILLED } else { &STAR_ICON }, 20.0)
                     .color(if favorite { brand } else { t.text_secondary }))))
+            .child(el().key("find-messages").size(38.0, 38.0).center().radius(7.0)
+                .role("button").label(if is_channel { "Find in channel" } else { "Find in chat" })
+                .help(if cfg!(target_os = "macos") { "Find messages (⌘F)" } else { "Find messages (Ctrl+F)" })
+                .focusable(true).hover(t.hover).cursor(rune::Cursor::Pointer)
+                .on_press_tx(|s: &mut State, tx| { message_search::open_scoped(s, tx); })
+                .child(rune::icon(&SEARCH_ICON, 19.0).color(t.text_secondary)))
     });
 
     let rail = col().key("navigation").role("navigation").label("Workspace").w(RAIL_WIDTH).h_full()
@@ -347,13 +377,20 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
         }));
     let pane = conversation_pane(s, session, is_channel, brand, selected);
     let body = row().key("workspace").w_full().grow(1.0).min_h(0.0).child(rail)
-        .children((!s.sidebar_hidden && sidebar_width > 0.0).then_some(sidebar))
-        .children((!s.sidebar_hidden).then_some(divider))
-        .child(col().grow(1.0).shrink().min_w(0.0).min_h(0.0).h_full().children(header).child(pane));
+        .children((show_sidebar && sidebar_width > 0.0).then_some(sidebar))
+        .children(show_sidebar.then_some(divider))
+        .children((!scoped_search_open || !compact_search).then(|| {
+            col().grow(1.0).shrink().min_w(0.0).min_h(0.0).h_full().children(header).child(pane)
+        }))
+        .children(scoped_search_open.then(|| {
+            super::search::panel(s, &conversations, compact_search, brand)
+        }));
     // Rune's modal scope includes later siblings, so keep the background outside search inert.
-    let body = if query.is_empty() { body } else { body.inert() };
+    let body = if query.is_empty() && !global_search_open { body } else { body.inert() };
+    let search = if global_search_open { search.inert() } else { search };
     col().w_full().h_full().fill(t.bg).child(search).child(body)
         .children(results)
+        .children(global_search_open.then(|| super::search::panel(s, &conversations, false, brand)))
 }
 
 struct ChannelPost {
@@ -465,6 +502,7 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
                             .on_press_tx(move |s: &mut State, tx| {
                                 s.reply_highlight = None;
                                 s.reply_error = None;
+                                s.search_jump = false;
                                 s.reply_target = Some(target.clone());
                                 reveal_reply(s, tx);
                             })
@@ -617,6 +655,9 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
                 .child(col().w_full().items_center().px(22.0).py(14.0)
                     .child(col().w_full().max_w(pane_width).gap(6.0)
                     .children(s.reply_error.as_deref().map(|e| note(e).wrap().role("alert").padding(10.0).radius(6.0).fill(t.card).border_sides([0.0, 0.0, 0.0, 3.0], brand)))
+                    .children((s.search_jump && s.reply_target.is_some()).then(|| {
+                        note("Locating message in history…").role("status").wrap().padding(10.0)
+                    }))
                     .children(s.send_error.as_deref().map(|e| note(e).wrap().role("alert").padding(10.0).radius(6.0).fill(t.card).border_sides([0.0, 0.0, 0.0, 3.0], brand)))
                     .children(s.deleting.as_ref().map(|m| row().w_full().gap(12.0).items_center()
                         .child(note(&format!("Delete \"{}\"?", m.text.chars().take(60).collect::<String>())).font(type_::LABEL).truncate().shrink().min_w(0.0))
@@ -680,6 +721,14 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
 pub(crate) fn search_key(s: &mut State, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     if !matches!(s.screen, Screen::Main { .. }) || s.editor || s.viewer.is_some() || s.menu.is_some() || s.settings_panel {
         return false;
+    }
+    if s.message_search.open && s.message_search.scope.is_none() { return false; }
+    if rune::Keybind::new("mod+f").matches_tx(e, tx) {
+        return message_search::open_scoped(s, tx);
+    }
+    if e.key == rune::Key::Escape && s.message_search.open && s.search.text.is_empty() {
+        super::search::close(s, tx);
+        return true;
     }
     if !rune::Keybind::new("ctrl+e").matches_tx(e, tx)
         && !rune::Keybind::new("ctrl+alt+e").matches_tx(e, tx) { return false }
@@ -825,6 +874,161 @@ mod tests {
         rt.pointer_up(900.0, 650.0);
         rt.frame(0.0);
         assert!(rt.state.search.text.is_empty());
+    }
+
+    #[test]
+    fn top_search_previews_messages_while_typing_and_opens_a_selection() {
+        let mut s = init();
+        demo(&mut s);
+        if let Screen::Main { chats, .. } = &mut s.screen {
+            chats[1].title = "Gears design".into();
+        }
+        let mut rt = rune::Runtime::new(s, view, (1000.0, 680.0), rune::Env::new(true, 1.0));
+        let settle = |rt: &mut rune::Runtime<State>| for _ in 0..60 { rt.frame(1.0 / 60.0); };
+        let type_text = |rt: &mut rune::Runtime<State>, value: &str| {
+            for ch in value.chars() {
+                rt.key(rune::KeyEvent { key: rune::Key::Text(ch.to_string()), mods: Default::default() });
+                rt.frame(0.0);
+            }
+        };
+        settle(&mut rt);
+        rt.update(|_, tx| tx.focus("search", false));
+        settle(&mut rt);
+        let preview = "message-preview/a/2026-11-14T10:31:00Z";
+        type_text(&mut rt, "column");
+        settle(&mut rt);
+        assert!(rt.find(preview).is_some());
+        assert!(!rt.elements().iter().any(|e| matches!(
+            e.text.as_deref(), Some("Chats and channels" | "No matching chats or channels.")
+        )));
+        rt.update(|s, _| message_search::clear_top(s));
+        settle(&mut rt);
+        type_text(&mut rt, "gears");
+        settle(&mut rt);
+        let (_, chat_y) = rt.find("hit/b").unwrap();
+        let (_, preview_y) = rt.find(preview).unwrap();
+        let heading = rt.elements().into_iter().find(|e| e.text.as_deref() == Some("Recent messages")).unwrap();
+        assert!(chat_y < heading.rect[1] && heading.rect[1] < preview_y);
+        assert!(!rt.state.message_search.open);
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("search") && e.focused));
+
+        type_text(&mut rt, "zz");
+        settle(&mut rt);
+        assert!(rt.find("results").is_none());
+        for _ in 0..2 {
+            rt.key(rune::KeyEvent { key: rune::Key::Backspace, mods: Default::default() });
+            rt.frame(0.0);
+        }
+        settle(&mut rt);
+        rt.key(rune::KeyEvent { key: rune::Key::Down, mods: Default::default() });
+        settle(&mut rt);
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("hit/b") && e.focused));
+        rt.key(rune::KeyEvent { key: rune::Key::Down, mods: Default::default() });
+        settle(&mut rt);
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some(preview) && e.focused));
+        rt.key(rune::KeyEvent { key: rune::Key::Enter, mods: Default::default() });
+        settle(&mut rt);
+        assert!(rt.state.search.text.is_empty());
+        assert!(rt.state.search_preview.results("gears").is_empty());
+        assert_eq!(rt.state.reply_highlight.as_ref().unwrap().0, "2026-11-14T10:31:00Z");
+    }
+
+    #[test]
+    fn message_search_opens_globally_and_in_the_current_conversation() {
+        for (width, height) in [(640.0, 400.0), (1200.0, 680.0)] {
+            let mut s = init();
+            demo(&mut s);
+            let other_chat_history = s.messages.as_ref().unwrap().as_ref().unwrap().clone();
+            s.history.insert("b".into(), other_chat_history);
+            let mut rt = rune::Runtime::new(s, view, (width, height), rune::Env::new(true, 1.0));
+            rt.on_key = Some(search_key);
+            let settle = |rt: &mut rune::Runtime<State>| for _ in 0..60 { rt.frame(1.0 / 60.0); };
+            let enter = rune::KeyEvent { key: rune::Key::Enter, mods: Default::default() };
+            settle(&mut rt);
+            rt.update(|s, tx| {
+                s.search.replace_text("column gears");
+                tx.focus("search", false);
+            });
+            settle(&mut rt);
+            rt.key(enter.clone());
+            settle(&mut rt);
+            assert!(rt.state.message_search.scope.is_none());
+            let elements = rt.elements();
+            let dialog = elements.iter().find(|e| e.key.as_deref() == Some("message-search-dialog")).unwrap();
+            assert_eq!(dialog.role, "dialog");
+            let [x, y, w, h] = dialog.rect;
+            assert!(x > 0.0 && y > 0.0 && x + w < width && y + h < height);
+            assert!(elements.iter().any(|e| e.key.as_deref() == Some("message-search-input") && e.focused));
+            assert!(rt.find("message-search-panel").is_none());
+            assert!(rt.find("message-hit/b/2026-11-14T10:31:00Z").is_some());
+            let key = "message-hit/a/2026-11-14T10:31:00Z";
+            let (x, y) = rt.find(key).expect("keyword search should find the matching message");
+            let picked = rt.element_at(x, y).map(|element| element.path().to_string());
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            settle(&mut rt);
+            assert_eq!(rt.state.reply_highlight.as_ref().map(|highlight| highlight.0.as_str()), Some("2026-11-14T10:31:00Z"),
+                "width={width}, hit at ({x}, {y}), pointer picked {picked:?}");
+            assert!(rt.find("message-search-dialog").is_none());
+
+            rt.key(rune::KeyEvent { key: rune::Key::Command('f'), mods: rune::Mods {
+                ctrl: !cfg!(target_os = "macos"), logo: cfg!(target_os = "macos"), cmd: true, ..Default::default()
+            } });
+            settle(&mut rt);
+            assert_eq!(rt.state.message_search.scope.as_deref(), Some("a"));
+            assert!(rt.find("message-search-panel").is_some());
+            assert!(rt.find("message-search-dialog").is_none());
+            assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("message-search-input") && e.focused));
+            for ch in "BERNOULLI".chars() {
+                rt.key(rune::KeyEvent { key: rune::Key::Text(ch.to_string()), mods: Default::default() });
+                rt.frame(0.0);
+            }
+            settle(&mut rt);
+            let scoped_hit = "message-hit/a/2026-11-14T10:24:00Z";
+            assert!(rt.find(scoped_hit).is_some());
+            assert!(rt.find("message-hit/b/2026-11-14T10:24:00Z").is_none());
+            assert!(rt.find(key).is_none());
+            for _ in "BERNOULLI".chars() {
+                rt.key(rune::KeyEvent { key: rune::Key::Backspace, mods: Default::default() });
+                rt.frame(0.0);
+            }
+            settle(&mut rt);
+            assert!(rt.find(scoped_hit).is_none());
+            assert!(rt.find("message-search-status").is_none());
+            rt.key(rune::KeyEvent { key: rune::Key::Escape, mods: Default::default() });
+            settle(&mut rt);
+            assert!(!rt.state.message_search.open, "Escape should close search at width {width}");
+            assert!(rt.find("find-messages").is_some());
+        }
+    }
+
+    #[test]
+    fn channel_search_results_open_nested_replies_in_context() {
+        let mut s = init();
+        channel_posts_demo(&mut s);
+        history::remember_selected(&mut s);
+        demo(&mut s);
+        s.conversation_section = ConversationSection::Chat;
+        s.search.replace_text("review");
+        message_search::open_global(&mut s, &mut Tx::default());
+        let mut rt = rune::Runtime::new(s, view, (1200.0, 680.0), rune::Env::new(false, 1.0));
+        let settle = |rt: &mut rune::Runtime<State>| for _ in 0..60 { rt.frame(1.0 / 60.0); };
+        let click = |rt: &mut rune::Runtime<State>, key| {
+            let (x, y) = rt.find(key).unwrap();
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            settle(rt);
+        };
+        settle(&mut rt);
+        click(&mut rt, "message-filter-chats");
+        assert!(rt.find("message-hit/backend/102").is_none());
+        click(&mut rt, "message-filter-channels");
+        click(&mut rt, "message-hit/backend/102");
+        assert_eq!(rt.state.selected.as_deref(), Some("backend"));
+        assert_eq!(rt.state.conversation_section, ConversationSection::Teams);
+        assert_eq!(rt.state.reply_highlight.as_ref().unwrap().0, "channel-review");
+        assert!(rt.find("post-replies/channel-update").is_some());
+        assert!(rt.find("msg/channel-review").is_some());
     }
 
     #[test]
@@ -1046,8 +1250,7 @@ mod tests {
         });
         settle(&mut rt);
         assert!(rt.find("hit/general").is_some());
-        rt.key(rune::KeyEvent { key: rune::Key::Enter, mods: Default::default() });
-        settle(&mut rt);
+        click(&mut rt, "hit/general");
         assert_eq!(rt.state.selected.as_deref(), Some("general"));
         assert_eq!(rt.state.conversation_section, ConversationSection::Teams);
         assert!(rt.find("channel/general").is_some());

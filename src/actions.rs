@@ -78,7 +78,9 @@ pub(crate) fn sign_out(s: &mut State) {
     s.editing = None;
     s.editor = false;
     (s.replying, s.menu, s.deleting) = (None, None, None);
-    s.search.clear();
+    message_search::clear_top(s);
+    s.message_search.close();
+    s.search_jump = false;
     s.send_error = None;
     auth::sign_out();
     (s.selected, s.messages) = (None, None);
@@ -110,11 +112,15 @@ pub(crate) fn reveal_conversation(s: &mut State, id: &str) {
 
 pub(crate) fn open_chat(s: &mut State, id: String) {
     message_state::load_receipts(s, &id);
+    if s.message_search.scope.as_ref().is_some_and(|scope| scope != &id) {
+        s.message_search.close();
+    }
     history::remember_selected(s);
     #[cfg(feature = "image")]
     s.preview_rows.clear();
     s.reply_highlight = None;
     s.reply_target = None;
+    s.search_jump = false;
     s.reply_error = None;
     let Screen::Main { session, .. } = &s.screen else { return };
     let session = session.clone();
@@ -144,21 +150,32 @@ pub(crate) fn open_chat(s: &mut State, id: String) {
     });
 }
 
-/// Reveal the reply target, following older pages until it is found or history runs out.
+/// Reveal a quoted message or a search result, following older pages as needed.
 pub(crate) fn reveal_reply(s: &mut State, tx: &mut Tx) -> bool {
     let Some(target) = s.reply_target.as_deref() else { return false };
+    if s.messages.as_ref().is_some_and(Result::is_err) {
+        s.reply_target = None;
+        s.search_jump = false;
+        return true;
+    }
     let Some(Ok(page)) = &s.messages else { return false };
-    if !target.is_empty() && let Some(msg) = page.msgs.iter().find(|m| m.server_id == target || m.id == target) {
+    let found = (!target.is_empty()).then(|| page.msgs.iter().find(|msg| msg.server_id == target || msg.id == target)).flatten();
+    if let Some(msg) = found.filter(|msg| !s.search_jump || !msg.deleted) {
         tx.scroll_center_in("messages", format!("msg/{}", msg.id));
         s.reply_highlight = Some((msg.id.clone(), std::time::Instant::now()));
         s.reply_highlight_on = true;
         tx.wake_after(std::time::Duration::from_millis(150));
         s.reply_target = None;
+        s.search_jump = false;
         return true;
     }
-    if target.is_empty() || page.older.is_none() {
+    if found.is_some() || target.is_empty() || page.older.is_none() {
         s.reply_target = None;
-        s.reply_error = Some("The quoted message is unavailable or was deleted.".into());
+        s.reply_error = Some(if std::mem::take(&mut s.search_jump) {
+            "This search result is unavailable or was deleted."
+        } else {
+            "The quoted message is unavailable or was deleted."
+        }.into());
         return true;
     }
     load_older(s);

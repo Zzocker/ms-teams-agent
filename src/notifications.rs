@@ -66,7 +66,7 @@ fn notification_current(s: &State, attempt: u64, id: &str) -> bool {
 fn open_notification(s: &mut State, attempt: u64, id: &str, token: Option<&str>) {
     if !notification_current(s, attempt, id) { return; }
     reveal_conversation(s, id);
-    s.search.clear();
+    message_search::clear_top(s);
     s.viewer = None;
     s.editor = false;
     open_chat(s, id.to_owned());

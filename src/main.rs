@@ -14,6 +14,7 @@ mod markdown;
 mod teams;
 mod notifications;
 mod message_state;
+mod message_search;
 mod releases;
 mod settings;
 mod ui;
@@ -64,6 +65,9 @@ struct State {
     #[cfg_attr(not(feature = "image"), allow(dead_code))]
     viewer: Option<String>,
     reply_target: Option<String>,
+    search_jump: bool,
+    message_search: message_search::Search,
+    search_preview: message_search::Preview,
     reply_error: Option<String>,
     reply_highlight: Option<(String, std::time::Instant)>,
     reply_highlight_on: bool,
@@ -163,6 +167,9 @@ fn init() -> State {
         settings_file: None,
         viewer: None,
         reply_target: None,
+        search_jump: false,
+        message_search: Default::default(),
+        search_preview: Default::default(),
         reply_error: None,
         reply_highlight: None,
         reply_highlight_on: false,
@@ -233,6 +240,8 @@ fn setup(s: &mut State, waker: Waker) {
     s.file_download.set_waker(waker.clone());
     s.mentions.setup(waker.clone());
     s.older_loader.set_waker(waker.clone());
+    s.message_search.set_waker(waker.clone());
+    s.search_preview.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
     s.reactor.set_waker(waker.clone());
     s.reader.set_waker(waker.clone());
@@ -330,7 +339,8 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         if s.selected.as_ref() == Some(&id) && s.reply_target.is_some() {
             if let Err(e) = &r {
                 s.reply_target = None;
-                s.reply_error = Some(format!("Could not load the quoted message: {e}"));
+                let title = if std::mem::take(&mut s.search_jump) { "the search result" } else { "the quoted message" };
+                s.reply_error = Some(format!("Could not load {title}: {e}"));
                 changed = true;
             }
         }
@@ -448,6 +458,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
         tx.wake_after(std::time::Duration::from_secs(60));
     }
+    changed |= message_search::poll(s, tx);
     let revealed = reveal_reply(s, tx);
     changed || revealed
 }
