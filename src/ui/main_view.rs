@@ -443,6 +443,13 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
     let t = tok::theme(dark());
     let sent = rune::oklch(if dark() { 0.38 } else { 0.92 }, 0.055, 266.0);
     let pane_width = if is_channel { 760.0 } else { 1040.0 };
+    let message_column = || col().w_full().max_w(pane_width);
+    let row_gap = 8.0;
+    let avatar_width = 32.0;
+    let receipt_width = 20.0;
+    let (content_left, content_right) = if is_channel { (0.0, 0.0) } else {
+        (avatar_width + row_gap, receipt_width + row_gap)
+    };
     let send_label = compose_action_label(s, is_channel);
     let can_send = !s.sender.is_pending() && (!s.draft.text.trim().is_empty() || !s.pasted.is_empty() || !s.attached.is_empty());
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary);
@@ -525,7 +532,7 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
                     .children(emojis.iter().enumerate().map(|(i, (url, alt, size))| message_emoji(s, url, alt, *size).key(format!("emoji/{}/{i}", m.id))))));
                 // Stable keys keep a moving history window from morphing one message into another.
                 let line = row().key(format!("msg/{}", m.id)).arrives_whole()
-                    .w_full().gap(8.0).pt(if head { 12.0 } else { 0.0 });
+                    .w_full().gap(row_gap).pt(if head { 12.0 } else { 0.0 });
                 #[cfg(feature = "image")]
                 let line = if !m.images.is_empty() || !emojis.is_empty() || m.files.iter().any(|f| f.preview.is_some()) {
                     let id = m.id.clone();
@@ -588,7 +595,7 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
                 } else {
                     let body = hover_surface(body).children(actions)
                         .children(delivery.filter(|label| *label != "Sending…").map(|label|
-                            el().pin(None, None, Some(-28.0), Some(0.0)).child(message_delivery(m, label))));
+                            el().pin(None, None, Some(-content_right), Some(0.0)).child(message_delivery(m, label))));
                     let content = col().gap(4.0).shrink().min_w(0.0);
                     let content = if m.mine { content.items_end() } else { content }
                         .children((head || m.edited).then(|| row().gap(8.0).items_center().shrink().min_w(0.0)
@@ -598,9 +605,10 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
                         .children(status)
                         .children(undo);
                     if m.mine {
-                        line.justify_end().items_end().child(content).child(el().w(20.0))
+                        line.pl(content_left).justify_end().items_end().child(content).child(el().w(receipt_width))
                     } else {
-                        line.child(if head { user_avatar(s, &m.sender_id, &m.sender, 32.0) } else { el().w(32.0) })
+                        line.pr(content_right)
+                            .child(if head { user_avatar(s, &m.sender_id, &m.sender, avatar_width) } else { el().w(avatar_width) })
                             .child(content)
                     }
                 };
@@ -622,7 +630,8 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
             } else {
                 msgs.iter().enumerate().flat_map(|(i, m)| {
                     let new_day = i.checked_sub(1).is_none_or(|j| day(&msgs[j].time) != day(&m.time));
-                    let divider = new_day.then(|| row().key(format!("day/{}", m.id)).arrives_whole().w_full().gap(12.0).items_center().pt(16.0).pb(8.0)
+                    let divider = new_day.then(|| row().key(format!("day/{}", m.id)).arrives_whole().w_full().gap(12.0).items_center()
+                        .pl(content_left).pr(content_right).pt(16.0).pb(8.0)
                         .child(el().h(1.0).grow(1.0).fill(t.separator))
                         .child(note(&message_date(&m.time, today)).font(type_::LABEL))
                         .child(el().h(1.0).grow(1.0).fill(t.separator)));
@@ -630,7 +639,7 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
                 }).collect()
             };
             let list = col().w_full().items_center().px(22.0).py(12.0)
-                .child(col().w_full().max_w(pane_width).gap(if is_channel { 10.0 } else { 4.0 }).growth(GrowthSpec::default())
+                .child(message_column().gap(if is_channel { 10.0 } else { 4.0 }).growth(GrowthSpec::default())
                     .children(bubbles)
                     .children(msgs.is_empty().then(|| col().key("messages-empty").w_full().gap(6.0).py(24.0)
                         .child(text(if is_channel { "No posts yet" } else { "Start the conversation" }).font(type_::TITLE).color(t.text))
@@ -653,7 +662,7 @@ fn conversation_pane(s: &State, session: &Session, is_channel: bool, brand: rune
                     }))
                 .children(message_state::typing_label(s, id).map(|label| note(&label).font(type_::LABEL).px(22.0).py(6.0)))
                 .child(col().w_full().items_center().px(22.0).py(14.0)
-                    .child(col().w_full().max_w(pane_width).gap(6.0)
+                        .child(message_column().pl(content_left).pr(content_right).gap(6.0)
                     .children(s.reply_error.as_deref().map(|e| note(e).wrap().role("alert").padding(10.0).radius(6.0).fill(t.card).border_sides([0.0, 0.0, 0.0, 3.0], brand)))
                     .children((s.search_jump && s.reply_target.is_some()).then(|| {
                         note("Locating message in history…").role("status").wrap().padding(10.0)
@@ -1052,6 +1061,13 @@ mod tests {
                 let header = elements.iter().find(|e| e.key.as_deref() == Some("conversation-header")).unwrap();
                 let draft = elements.iter().find(|e| e.key.as_deref() == Some("draft")).unwrap();
                 assert!(draft.rect[1] > header.rect[1] + header.rect[3]);
+                let rect = |key: &str| elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect;
+                let composer = rect("composer");
+                let incoming = rect("bubble/sample-incoming");
+                let outgoing = rect("bubble/sample-outgoing");
+                assert!((incoming[0] - composer[0]).abs() < 1.0, "incoming message aligns with the composer at width {width}");
+                assert!((outgoing[0] + outgoing[2] - composer[0] - composer[2]).abs() < 1.0,
+                    "outgoing message aligns with the composer at width {width}");
             }
         }
     }
@@ -1128,6 +1144,7 @@ mod tests {
         assert!((incoming[0] - outgoing[0]).abs() < 1.0);
         assert!((incoming[2] - outgoing[2]).abs() < 1.0);
         assert!((incoming[0] - composer[0]).abs() < 1.0);
+        assert!((incoming[2] - composer[2]).abs() < 1.0);
         assert!(get("time/channel-update").rect[1] < get("bubble/channel-update").rect[1]);
         let replies = get("post-replies/channel-update");
         for id in ["channel-review", "channel-confirm"] {
