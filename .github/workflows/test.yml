@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: ubuntu, os: ubuntu-22.04 }
+          - { name: ubuntu, os: ubuntu-22.04, container: "ubuntu:22.04" }
           - { name: arch, os: ubuntu-latest, container: "archlinux:latest" }
           - { name: windows, os: windows-latest }
           - { name: macos, os: macos-15 }
@@ -24,7 +24,13 @@ jobs:
       - if: matrix.name == 'arch'
         run: pacman -Syu --noconfirm --needed base-devel git rustup python libxkbcommon wayland fontconfig vulkan-icd-loader gst-plugins-base gst-plugins-good gst-plugins-bad libnice && rustup default stable
       - if: matrix.name == 'ubuntu'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-tools gstreamer1.0-plugins-bad gstreamer1.0-nice
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config xz-utils \
+            libfontconfig1 libvulkan1 mesa-vulkan-drivers libwayland-dev libxkbcommon-dev \
+            libgstreamer-plugins-bad1.0-dev gstreamer1.0-tools gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-good gstreamer1.0-nice
       - uses: actions/checkout@v4
       - if: matrix.name != 'arch'
         uses: dtolnay/rust-toolchain@stable
