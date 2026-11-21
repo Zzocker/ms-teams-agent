@@ -6,6 +6,8 @@ use serde_json::Value;
 use std::ops::Range;
 
 mod html;
+#[cfg(feature = "call-audio")]
+pub(crate) mod calling;
 mod media;
 mod files;
 mod mentions;

@@ -22,9 +22,9 @@ jobs:
     container: ${{ matrix.container }}
     steps:
       - if: matrix.name == 'arch'
-        run: pacman -Syu --noconfirm --needed base-devel git rustup python libxkbcommon wayland fontconfig vulkan-icd-loader && rustup default stable
+        run: pacman -Syu --noconfirm --needed base-devel git rustup python libxkbcommon wayland fontconfig vulkan-icd-loader gst-plugins-base gst-plugins-good gst-plugins-bad libnice && rustup default stable
       - if: matrix.name == 'ubuntu'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-tools gstreamer1.0-plugins-bad gstreamer1.0-nice
       - uses: actions/checkout@v4
       - if: matrix.name != 'arch'
         uses: dtolnay/rust-toolchain@stable
@@ -32,6 +32,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: ./.github/actions/setup-gstreamer
       - name: Rust tests
         run: cargo test --locked
       - name: Release build

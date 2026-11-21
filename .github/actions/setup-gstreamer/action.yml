@@ -1,0 +1,28 @@
+name: Set up GStreamer
+description: Install the native audio calling dependencies for desktop builds.
+runs:
+  using: composite
+  steps:
+    - if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $version = '1.28.9'
+        $root = Join-Path $env:RUNNER_TEMP 'gstreamer'
+        $filename = "gstreamer-1.0-msvc-x86_64-$version.exe"
+        $installer = Join-Path $env:RUNNER_TEMP $filename
+        Invoke-WebRequest "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc/$filename" -OutFile $installer
+        $install = Start-Process -FilePath $installer -ArgumentList @(
+          '/VERYSILENT', '/NORESTART', '/CURRENTUSER', '/TYPE=devel', "/DIR=`"$root`""
+        ) -Wait -PassThru
+        if ($install.ExitCode -ne 0) { throw "GStreamer setup exited with code $($install.ExitCode)" }
+        "$root\bin" >> $env:GITHUB_PATH
+        "PKG_CONFIG_PATH=$root\lib\pkgconfig" >> $env:GITHUB_ENV
+    - if: runner.os == 'macOS'
+      shell: bash
+      run: brew install pkgconf gstreamer libnice-gstreamer
+    - shell: bash
+      run: |
+        pkg-config --modversion gstreamer-webrtc-1.0
+        for plugin in webrtcbin nicesrc opusenc; do
+          gst-inspect-1.0 "$plugin" > /dev/null
+        done

@@ -208,6 +208,19 @@ pub fn graph_access() -> Result<String, String> {
     access_for("https://graph.microsoft.com/.default offline_access")
 }
 
+/// Teams Web's IC3 calling gateway has its own token audience.
+#[cfg(feature = "call-audio")]
+pub fn calling_access(user_id: &str) -> Result<String, String> {
+    let refresh = std::fs::read_to_string(session_file()?).map_err(|e| e.to_string())?;
+    let (access, _) = resource_token("93aca3ff-e61e-477f-b3e7-9fe10c6b97af/.default offline_access", &refresh)?;
+    let claims = access.split('.').nth(1).and_then(b64url)
+        .and_then(|claims| serde_json::from_slice::<Value>(&claims).ok());
+    if !claims.as_ref().and_then(|claims| claims["oid"].as_str()).is_some_and(|oid| oid.eq_ignore_ascii_case(user_id)) {
+        return Err("The calling token is for a different Teams account.".into());
+    }
+    Ok(access)
+}
+
 /// For a SharePoint site's files API (file previews). Every preview needs one, so it's kept
 /// while it's fresh.
 #[cfg_attr(not(feature = "image"), allow(dead_code))]
@@ -228,6 +241,12 @@ pub fn sharepoint_access(host: &str) -> Result<String, String> {
 /// An access token for `scope`'s audience from the stored session; each audience needs its own.
 fn access_for(scope: &str) -> Result<String, String> {
     let refresh = std::fs::read_to_string(session_file()?).map_err(|e| e.to_string())?;
+    let (access, refresh) = resource_token(scope, &refresh)?;
+    save(&refresh)?;
+    Ok(access)
+}
+
+fn resource_token(scope: &str, refresh: &str) -> Result<(String, String), String> {
     let v = post(&endpoint("token"), &[
         ("grant_type", "refresh_token"),
         ("client_id", &client_id()),
@@ -235,10 +254,7 @@ fn access_for(scope: &str) -> Result<String, String> {
         ("scope", scope),
     ])?;
     match parse_token(&v)? {
-        Token::Ok { access, refresh } => {
-            save(&refresh)?;
-            Ok(access)
-        }
+        Token::Ok { access, refresh } => Ok((access, refresh)),
         Token::Rejected(e) => Err(e),
         Token::Pending { .. } => Err("Teams authorization is pending.".into()),
     }

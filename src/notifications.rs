@@ -65,6 +65,8 @@ fn notification_current(s: &State, attempt: u64, id: &str) -> bool {
 
 fn open_notification(s: &mut State, attempt: u64, id: &str, token: Option<&str>) {
     if !notification_current(s, attempt, id) { return; }
+    #[cfg(feature = "call-audio")]
+    { s.calling.expanded = false; }
     reveal_conversation(s, id);
     message_search::clear_top(s);
     s.viewer = None;
@@ -77,6 +79,8 @@ fn open_notification(s: &mut State, attempt: u64, id: &str, token: Option<&str>)
 }
 
 pub fn chat_open(s: &State, id: &str) -> bool {
+    #[cfg(feature = "call-audio")]
+    if s.calling.expanded { return false; }
     s.window_focused && s.window_visible && s.selected.as_deref() == Some(id)
 }
 
@@ -173,7 +177,7 @@ fn reconcile(s: &mut State, fresh: Vec<Chat>) {
             let arrived = chat.time > old.time;
             chat.latest = old.latest.iter().chain(&chat.latest).max_by_key(|h| h.server_id).cloned();
             chat.title = old.title.clone();
-            chat.avatar_id = old.avatar_id.clone();
+            if chat.avatar_id.is_empty() { chat.avatar_id.clone_from(&old.avatar_id); }
             chat.avatar_members = old.avatar_members.clone();
             if arrived && chat.unread { notices.push(chat.clone()); }
             reload |= arrived && selected.as_ref() == Some(&chat.id);
@@ -210,7 +214,7 @@ fn receive(s: &mut State, mut chat: Chat, message: Option<Msg>, server_id: &str,
     if let Some(i) = prior {
         let old = &chats[i];
         chat.title = old.title.clone();
-        chat.avatar_id = old.avatar_id.clone();
+        if chat.avatar_id.is_empty() { chat.avatar_id.clone_from(&old.avatar_id); }
         chat.avatar_members = old.avatar_members.clone();
         chat.unread = old.unread || arrived;
         chat.latest = old.latest.iter().chain(&chat.latest).max_by_key(|h| h.server_id).cloned();
