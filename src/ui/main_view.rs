@@ -328,7 +328,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
         };
         let identity = col().min_w(0.0).gap(2.0);
         let identity = if is_channel { identity.w(168.0).shrink() } else { identity.grow(1.0) };
-        row().key("conversation-header").w_full().gap(10.0).px(18.0).py(9.0).items_center().fill(t.card)
+        let header = row().key("conversation-header").w_full().gap(10.0).px(18.0).py(9.0).items_center().fill(t.card)
             .border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
             .child(icon)
             .child(identity
@@ -349,7 +349,11 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
                 .help(if cfg!(target_os = "macos") { "Find messages (⌘F)" } else { "Find messages (Ctrl+F)" })
                 .focusable(true).hover(t.hover).cursor(rune::Cursor::Pointer)
                 .on_press_tx(|s: &mut State, tx| { message_search::open_scoped(s, tx); })
-                .child(rune::icon(&SEARCH_ICON, 19.0).color(t.text_secondary)))
+                .child(rune::icon(&SEARCH_ICON, 19.0).color(t.text_secondary)));
+        #[cfg(feature = "call-audio")]
+        let header = header.children(active.filter(|(chat, _)| !chat.channel)
+            .and_then(|(chat, _)| super::call::start_button(s, session, chat)));
+        header
     });
 
     let rail = col().key("navigation").role("navigation").label("Workspace").w(RAIL_WIDTH).h_full()
@@ -388,7 +392,11 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
     // Rune's modal scope includes later siblings, so keep the background outside search inert.
     let body = if query.is_empty() && !global_search_open { body } else { body.inert() };
     let search = if global_search_open { search.inert() } else { search };
-    col().w_full().h_full().fill(t.bg).child(search).child(body)
+    let layout = col().w_full().h_full().fill(t.bg).child(search);
+    #[cfg(feature = "call-audio")]
+    let layout = layout.children(super::call::compact(s).map(|status|
+        if query.is_empty() && !global_search_open { status } else { status.inert() }));
+    layout.child(body)
         .children(results)
         .children(global_search_open.then(|| super::search::panel(s, &conversations, false, brand)))
 }
@@ -1038,6 +1046,45 @@ mod tests {
         assert_eq!(rt.state.reply_highlight.as_ref().unwrap().0, "channel-review");
         assert!(rt.find("post-replies/channel-update").is_some());
         assert!(rt.find("msg/channel-review").is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "call-audio")]
+    fn audio_call_control_is_available_for_people_and_hidden_for_bots() {
+        let mut s = init();
+        message_states_demo(&mut s);
+        let me = "10000000-0000-4000-8000-000000000001";
+        let peer = "10000000-0000-4000-8000-000000000002";
+        let direct = format!("19:{me}_{peer}@unq.gbl.spaces");
+        let Screen::Main { session, chats } = &mut s.screen else { unreachable!() };
+        Arc::make_mut(session).user.id = me.into();
+        chats[0].id = direct.clone();
+        s.selected = Some(direct);
+        let mut rt = rune::Runtime::new(s, view, (640.0, 400.0), rune::Env::new(false, 1.0));
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let button = rt.elements().into_iter().find(|el| el.key.as_deref() == Some("audio-call")).unwrap();
+        assert_eq!(button.rect[2..], [44.0, 44.0]);
+        assert!(button.rect[0] + button.rect[2] <= 640.0);
+
+        let Screen::Main { chats, .. } = &mut rt.state.screen else { unreachable!() };
+        chats[0].avatar_id = format!("28:{peer}");
+        rt.invalidate();
+        rt.frame(0.0);
+        assert!(rt.find("audio-call").is_none(), "the bot avatar identifies the chat");
+
+        let Screen::Main { chats, .. } = &mut rt.state.screen else { unreachable!() };
+        chats[0].avatar_id.clear();
+        if let Some(Ok(page)) = &mut rt.state.messages {
+            page.msgs[0].sender_id = format!("28:{peer}");
+        }
+        rt.invalidate();
+        rt.frame(0.0);
+        assert!(rt.find("audio-call").is_none(), "a matching bot sender in history identifies the chat");
+
+        rt.state.selected = Some("48:notes".into());
+        rt.invalidate();
+        rt.frame(0.0);
+        assert!(rt.find("audio-call").is_none());
     }
 
     #[test]

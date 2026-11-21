@@ -89,8 +89,19 @@ pub(super) fn parse_conversations(v: &Value, me: &User) -> Vec<Chat> {
                 title: title.into(),
                 avatar_members: Vec::new(),
                 avatar_id: {
+                    let other = c["id"].as_str().and_then(|id| peer(id, &me.id));
+                    let bot_member = [&c["members"], &c["threadProperties"]["members"]].into_iter()
+                        .filter_map(Value::as_array).flatten()
+                        .filter_map(|member| member["id"].as_str().or_else(|| member.as_str()))
+                        .find(|id| {
+                            id.strip_prefix("28:").is_some_and(|bot| {
+                                other.is_some_and(|peer| bot.eq_ignore_ascii_case(peer))
+                            })
+                        });
                     let sender = avatar_id(last["from"].as_str().unwrap_or(""));
-                    if sender.starts_with("28:") { sender } else { String::new() }
+                    if let Some(bot) = bot_member { bot.into() }
+                    else if sender.starts_with("28:") { sender }
+                    else { String::new() }
                 },
                 preview: {
                     let content = html_to_text(last["content"].as_str().unwrap_or(""));
@@ -250,6 +261,14 @@ mod tests {
             "id": "19:me_bot@unq.gbl.spaces",
             "lastMessage": {"from": from, "imdisplayname": "GitHub Notifications"}
         }]}), &crate::auth::User::default());
+        assert_eq!(chats[0].avatar_id, mri);
+        let me = User { id: "11111111-1111-4111-8111-111111111111".into(), ..User::default() };
+        let thread = format!("19:{}_{}@unq.gbl.spaces", me.id, mri.strip_prefix("28:").unwrap());
+        let chats = super::parse_chats(&serde_json::json!({"conversations": [{
+            "id": thread,
+            "members": [{"id": mri}],
+            "lastMessage": {"from": format!("8:orgid:{}", me.id)}
+        }]}), &me);
         assert_eq!(chats[0].avatar_id, mri);
         let messages = super::parse_messages(&serde_json::json!({"messages": [{
             "from": from, "messagetype": "Text", "content": "Notification"

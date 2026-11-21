@@ -36,6 +36,8 @@ pub(crate) fn sign_in(s: &mut State, interactive: bool) {
 }
 
 pub(crate) fn sign_out(s: &mut State) {
+    #[cfg(feature = "call-audio")]
+    { s.calling = Default::default(); }
     s.message_state.clear();
     s.mentions.reset();
     s.history = Default::default();

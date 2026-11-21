@@ -30,7 +30,7 @@ Download a build from [Releases](https://github.com/Zzocker/ms-teams-agent/relea
 - [x] Attach documents and other device files in chats through OneDrive (up to 100 MiB each)
 - [x] Message reactions (six quick choices; existing reaction counts)
 - [ ] Presence and typing indicators
-- [ ] Voice and video calls
+- [ ] Voice and video calls ([experimental outgoing audio](docs/development.md#experimental-audio-calling))
 - [ ] Calendar and meetings
 - [ ] Favorites and pinned chats
 
