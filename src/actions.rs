@@ -68,6 +68,7 @@ pub(crate) fn sign_out(s: &mut State) {
     s.teams = None;
     s.pending_channels.clear();
     s.conversation_section = ConversationSection::Chat;
+    s.ask_me = Default::default();
     s.unread_only = false;
     s.sidebar_hidden = false;
     s.collapsed_teams.clear();
@@ -98,6 +99,7 @@ pub(crate) fn load_teams(s: &mut State) {
 
 /// Reveal a conversation opened outside the current sidebar list.
 pub(crate) fn reveal_conversation(s: &mut State, id: &str) {
+    s.ask_me.leave();
     if let Some(chat) = notifications::conversation(s, id) {
         let section = if chat.channel { ConversationSection::Teams } else { ConversationSection::Chat };
         if s.conversation_section != section || !chat.unread {
@@ -154,6 +156,7 @@ pub(crate) fn open_chat(s: &mut State, id: String) {
 
 /// Reveal a quoted message or a search result, following older pages as needed.
 pub(crate) fn reveal_reply(s: &mut State, tx: &mut Tx) -> bool {
+    if s.ask_me.open { return false; }
     let Some(target) = s.reply_target.as_deref() else { return false };
     if s.messages.as_ref().is_some_and(Result::is_err) {
         s.reply_target = None;

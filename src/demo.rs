@@ -60,6 +60,16 @@ pub(crate) fn file_demo(s: &mut State) {
 }
 
 pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
+    ("ask-me", |s| {
+        demo(s);
+        s.ask_me.open = true;
+    }),
+    ("ask-me-conversation", |s| {
+        demo(s);
+        ui::ask_me::demo_history(s);
+    }),
+    ("ask-me-citations", |s| ask_me_citation_demo(s, false)),
+    ("ask-me-source", |s| ask_me_citation_demo(s, true)),
     ("login", |s| s.screen = Screen::Login(None)),
     ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
     ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
@@ -82,21 +92,22 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
         s.send_error = Some("Could not restore message: chat service 403 Forbidden".into());
     }),
 
-    ("updates", |s| { demo(s); s.settings_panel = true; s.settings_updates = true; }),
+    ("ask-me-settings", |s| { demo(s); s.settings_panel = true; s.settings_section = settings::Section::AskMe; }),
+    ("updates", |s| { demo(s); s.settings_panel = true; s.settings_section = settings::Section::Updates; }),
     ("updates-current", |s| {
-        demo(s); s.settings_panel = true; s.settings_updates = true;
+        demo(s); s.settings_panel = true; s.settings_section = settings::Section::Updates;
         s.release_status = releases::Status::Current;
         s.release_checked_at = Some(chrono::Local::now());
     }),
     ("updates-available", |s| {
-        demo(s); s.settings_panel = true; s.settings_updates = true;
+        demo(s); s.settings_panel = true; s.settings_section = settings::Section::Updates;
         s.release_status = releases::Status::Available(releases::Release {
             version: semver::Version::new(0, 1, 1),
             url: "https://github.com/Zzocker/ms-teams-agent/releases/tag/v0.1.1".into(),
         });
         s.release_checked_at = Some(chrono::Local::now());
     }),
-    ("updates-error", |s| { demo(s); s.settings_panel = true; s.settings_updates = true; s.release_status = releases::Status::Failed; }),
+    ("updates-error", |s| { demo(s); s.settings_panel = true; s.settings_section = settings::Section::Updates; s.release_status = releases::Status::Failed; }),
     ("reply", |s| {
         demo(s);
         if let Some(Ok(page)) = &mut s.messages {
@@ -187,6 +198,16 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
         (s.selected, s.messages) = (None, None);
     }),
 ];
+
+pub(crate) fn ask_me_citation_demo(s: &mut State, show_source: bool) {
+    channel_posts_demo(s);
+    if let Some(Ok(page)) = s.messages.take() {
+        s.history.insert("backend".into(), page);
+    }
+    demo(s);
+    s.conversation_section = ConversationSection::Chat;
+    ui::ask_me::demo_citations(s, show_source);
+}
 
 /// Chats, teams and a saved favorite for local previews.
 pub(crate) fn workspace_demo(s: &mut State) {

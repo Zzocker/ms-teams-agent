@@ -112,6 +112,7 @@ const INSTALL: &str = "Download and extract the Apple Silicon archive. Quit Team
 const INSTALL: &str = "Download the package for your system. Quit Teams, replace your installed application, then reopen it.";
 
 pub fn panel(s: &State) -> Option<El> {
+    use settings::Section;
     if !s.settings_panel { return None; }
     let t = tok::theme(dark());
     let pending = s.release_loader.is_pending();
@@ -143,17 +144,24 @@ pub fn panel(s: &State) -> Option<El> {
         .child(row().w_full().grow(1.0).min_h(0.0)
             .child(col().key("settings-navigation").w(160.0).h_full().padding(12.0).gap(6.0).fill(t.bg)
                 .border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
-                .children([(false, "settings-appearance", "Appearance"), (true, "settings-updates", "Updates")].into_iter().map(|(updates, key, label)|
-                    link(key, label).w_full().fill(if s.settings_updates == updates { t.press } else { t.bg })
-                        .on_press(move |s: &mut State| s.settings_updates = updates))))
-            .child(if !s.settings_updates {
+                .children([
+                    (Section::Appearance, "settings-appearance", "Appearance"),
+                    (Section::AskMe, "settings-ask-me", "Ask Me"),
+                    (Section::Updates, "settings-updates", "Updates"),
+                ].into_iter().map(|(section, key, label)|
+                    link(key, label).w_full().checked(s.settings_section == section)
+                        .fill(if s.settings_section == section { t.press } else { t.bg })
+                        .on_press(move |s: &mut State| s.settings_section = section))))
+            .child(match s.settings_section {
+                Section::AskMe => model_connection::panel(s),
+                Section::Appearance =>
                 col().key("appearance-settings").grow(1.0).min_w(0.0).h_full().padding(20.0).gap(16.0)
                     .child(text("Appearance").font(type_::TITLE).color(t.text))
                     .child(col().w_full().padding(16.0).gap(8.0).radius(8.0).border(1.0, t.separator)
                         .child(text("Theme").font(type_::TITLE).color(t.text))
                         .child(note("Choose System, Dark, or Light."))
-                        .child(theme_button(s.theme)))
-            } else {
+                        .child(theme_button(s.theme))),
+                Section::Updates =>
                 col().grow(1.0).min_w(0.0).h_full().min_h(0.0).padding(20.0).gap(12.0)
                     .child(col().key("update-details").w_full().gap(12.0).padding(16.0).radius(8.0).border(1.0, t.separator)
                         .child(text("Updates").font(type_::TITLE).color(t.text))
@@ -177,7 +185,7 @@ pub fn panel(s: &State) -> Option<El> {
                         .children((!pending).then(|| if matches!(s.release_status, Status::Available(_)) {
                             link("download-update", "Download update").fill(tok::accent(0, dark())).on_press_tx(open_download)
                         } else { action })))
-                    .child(text("Checks include preview releases. Updates are installed manually.").font(type_::LABEL).color(t.text_secondary).wrap())
+                    .child(text("Checks include preview releases. Updates are installed manually.").font(type_::LABEL).color(t.text_secondary).wrap()),
             }))))
 }
 
@@ -231,7 +239,7 @@ mod tests {
         rt.pointer_down(updates_tab[0] + 10.0, updates_tab[1] + 10.0);
         rt.pointer_up(updates_tab[0] + 10.0, updates_tab[1] + 10.0);
         for _ in 0..60 { rt.frame(1.0 / 60.0); }
-        assert!(rt.state.settings_updates);
+        assert!(rt.state.settings_section == settings::Section::Updates);
         for key in ["settings-panel", "download-update", "close-settings"] {
             let elements = rt.elements();
             let element = elements.iter().find(|e| e.key.as_deref() == Some(key)).expect(key);

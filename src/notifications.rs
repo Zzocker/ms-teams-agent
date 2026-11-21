@@ -81,7 +81,7 @@ fn open_notification(s: &mut State, attempt: u64, id: &str, token: Option<&str>)
 pub fn chat_open(s: &State, id: &str) -> bool {
     #[cfg(feature = "call-audio")]
     if s.calling.expanded { return false; }
-    s.window_focused && s.window_visible && s.selected.as_deref() == Some(id)
+    !s.ask_me.open && s.window_focused && s.window_visible && s.selected.as_deref() == Some(id)
 }
 
 pub(crate) fn conversation<'a>(s: &'a State, id: &str) -> Option<&'a Chat> {

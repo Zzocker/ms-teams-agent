@@ -196,6 +196,7 @@ fn sort_hits(hits: &mut [Hit]) {
 }
 
 pub(crate) fn open_scoped(s: &mut State, tx: &mut Tx) -> bool {
+    if s.ask_me.open { return false; }
     let Some(id) = s.selected.clone() else { return false };
     clear_top(s);
     if s.message_search.scope.as_ref() != Some(&id) {
@@ -262,27 +263,34 @@ fn seed(s: &mut State) {
     }
 }
 
-fn candidates(s: &State, scope: Option<&str>, query: &str) -> (Vec<Hit>, Vec<Cursor>) {
-    let Screen::Main { chats, .. } = &s.screen else { return (vec![], vec![]) };
+pub(crate) fn conversations<'a>(s: &'a State, scope: Option<&str>) -> Vec<&'a Chat> {
+    let Screen::Main { chats, .. } = &s.screen else { return vec![] };
     let channels = s.teams.as_ref().and_then(|teams| teams.as_ref().ok()).into_iter().flatten().flat_map(|team| &team.channels);
     let mut ids = HashSet::new();
     let mut sources: Vec<&Chat> = channels.chain(&s.pending_channels).chain(chats)
         .filter(|chat| scope.is_none_or(|id| id == chat.id) && ids.insert(&chat.id))
         .collect();
     sources.sort_by(|a, b| b.time.cmp(&a.time));
+    sources
+}
 
+pub(crate) fn loaded_page<'a>(s: &'a State, conversation: &str) -> Option<&'a Page> {
+    if s.selected.as_deref() == Some(conversation) {
+        s.messages.as_ref().and_then(|page| page.as_ref().ok())
+    } else {
+        s.history.page(conversation)
+    }
+}
+
+fn candidates(s: &State, scope: Option<&str>, query: &str) -> (Vec<Hit>, Vec<Cursor>) {
     let query = query.to_lowercase();
     let words: Vec<_> = query.split_whitespace().collect();
     // Queue unvisited conversations before continuing older history in cached conversations.
     let mut hits = Vec::new();
     let mut cursors = Vec::new();
     let mut older = Vec::new();
-    for chat in sources {
-        let page = if s.selected.as_ref() == Some(&chat.id) {
-            s.messages.as_ref().and_then(|page| page.as_ref().ok())
-        } else {
-            s.history.page(&chat.id)
-        };
+    for chat in conversations(s, scope) {
+        let page = loaded_page(s, &chat.id);
         let cursor = Cursor { conversation: chat.id.clone(), channel: chat.channel, older: None };
         if let Some(page) = page {
             hits.extend(find_hits(&cursor, page, &words));
@@ -462,12 +470,24 @@ fn snippet(body: &str, words: &[&str]) -> (String, Vec<Range<usize>>) {
 }
 
 pub(crate) fn jump(s: &mut State, tx: &mut Tx, hit: &Hit) {
-    if s.selected.as_ref() != Some(&hit.conversation) {
-        reveal_conversation(s, &hit.conversation);
-        open_chat(s, hit.conversation.clone());
+    jump_to_message(s, tx, &hit.conversation, &hit.id);
+}
+
+pub(crate) fn jump_to_message(s: &mut State, tx: &mut Tx, conversation: &str, id: &str) {
+    let changing_chat = s.selected.as_deref() != Some(conversation);
+    let leaving_ask_me = s.ask_me.open;
+    let retrying_chat = leaving_ask_me && s.messages.as_ref().is_some_and(Result::is_err);
+    if leaving_ask_me || changing_chat {
+        reveal_conversation(s, conversation);
+    }
+    if changing_chat || retrying_chat {
+        open_chat(s, conversation.to_owned());
+    } else if leaving_ask_me {
+        s.restore_scroll = None;
+        notifications::mark_selected_read(s);
     }
     s.reply_error = None;
-    s.reply_target = Some(hit.id.clone());
+    s.reply_target = Some(id.to_owned());
     s.search_jump = true;
     reveal_reply(s, tx);
 }

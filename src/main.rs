@@ -19,6 +19,7 @@ mod teams;
 mod notifications;
 mod message_state;
 mod message_search;
+mod model_connection;
 mod releases;
 mod settings;
 mod ui;
@@ -52,7 +53,8 @@ struct State {
     release_loader: Latest<Result<Option<releases::Release>, String>>,
     release_status: releases::Status,
     settings_panel: bool,
-    settings_updates: bool,
+    settings_section: settings::Section,
+    model_connection: model_connection::Connection,
     release_checked_at: Option<chrono::DateTime<chrono::Local>>,
     release_open_error: bool,
     screen: Screen,
@@ -78,6 +80,7 @@ struct State {
     reply_highlight: Option<(String, std::time::Instant)>,
     reply_highlight_on: bool,
     conversation_section: ConversationSection,
+    ask_me: ui::ask_me::AskMe,
     unread_only: bool,
     sidebar_hidden: bool,
     favorites: settings::Favorites,
@@ -159,7 +162,8 @@ fn init() -> State {
         release_loader: Latest::default(),
         release_status: releases::Status::Idle,
         settings_panel: false,
-        settings_updates: false,
+        settings_section: Default::default(),
+        model_connection: Default::default(),
         release_checked_at: None,
         release_open_error: false,
         screen: Screen::Loading,
@@ -182,6 +186,7 @@ fn init() -> State {
         reply_highlight: None,
         reply_highlight_on: false,
         conversation_section: ConversationSection::Chat,
+        ask_me: Default::default(),
         unread_only: false,
         sidebar_hidden: false,
         favorites: Default::default(),
@@ -254,6 +259,7 @@ fn setup(s: &mut State, waker: Waker) {
     s.reactor.set_waker(waker.clone());
     s.reader.set_waker(waker.clone());
     s.release_loader.set_waker(waker.clone());
+    s.model_connection.worker.set_waker(waker.clone());
     s.waker = Some(waker);
     // Rune's headless tooling skips network sign-in.
     if !cfg!(test) && std::env::args().len() == 1 {
@@ -268,6 +274,8 @@ fn reply_blink(elapsed: f32) -> Option<bool> {
 
 fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let mut changed = releases::poll(s);
+    changed |= model_connection::poll(s);
+    changed |= ui::ask_me::poll(s, tx);
     #[cfg(feature = "call-audio")]
     { changed |= s.calling.poll(tx); }
     if let Some(result) = s.file_download.take() {

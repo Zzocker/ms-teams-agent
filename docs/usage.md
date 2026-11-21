@@ -56,3 +56,62 @@ The file picker is available in chats. Channel posts can include pasted images.
 Attachments sent by the earlier media-store implementation must be resent to appear in official Teams.
 Those older cards can still be downloaded through this app's Save dialog.
 On Linux, the native file picker requires an XDG desktop portal with a FileChooser backend.
+
+## Set up Ask Me with Docker
+
+Ask Me can use a model served on the same computer as Teams Agent. This setup runs
+Qwen3.5 2B (`Q4_K_M`) with llama.cpp on the CPU. The model download is about 1.3 GB,
+and Docker caps the container at 4 GiB of RAM. Keep enough memory available for the
+app and your operating system. [Model file](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/blob/main/Qwen3.5-2B-Q4_K_M.gguf)
+
+### Start the model server
+
+Start Docker Engine or Docker Desktop. Run this command in a POSIX shell. In PowerShell,
+join the lines into one command and omit the trailing backslashes.
+
+```sh
+docker run -d --name teams-ask-me-qwen-cpu \
+  --memory 4g --memory-swap 4g \
+  -p 127.0.0.1:11435:8080 \
+  -v teams-ask-me-gguf:/models -e LLAMA_CACHE=/models \
+  ghcr.io/ggml-org/llama.cpp:server \
+  -hf unsloth/Qwen3.5-2B-GGUF:Q4_K_M --no-mmproj \
+  --alias qwen3.5:2b-q4_K_M --ctx-size 2048 --parallel 1 \
+  --n-gpu-layers 0 --reasoning off --host 0.0.0.0 --port 8080
+```
+
+The named volume keeps the downloaded model between container runs. Docker publishes
+the API only on your computer's loopback address. [llama.cpp Docker documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md)
+
+The first startup can take several minutes while the model downloads and loads. Check
+the logs and health endpoint. In PowerShell, use `curl.exe`.
+
+```sh
+docker logs --tail 50 teams-ask-me-qwen-cpu
+curl -fsS http://127.0.0.1:11435/health
+```
+
+Wait for the health check to return `{"status":"ok"}`. If port `11435` is in use,
+choose a free host port in the `-p` option and use that same port in the API base URL.
+[llama.cpp health endpoint](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#get-health-returns-health-check-result)
+
+### Connect Teams Agent
+
+1. Open **Settings → Ask Me → Model connection**.
+2. Set **API base URL** to `http://127.0.0.1:11435/v1`.
+3. Set **Model ID** to `qwen3.5:2b-q4_K_M` and click **Test and save**.
+4. Open **Ask Me** in the left rail. Send `Hi` to check for a direct reply, then ask
+   about a detail in a recent Teams conversation. Click a citation to open the source message.
+
+**Test and save** sends a short test prompt. When a question needs Teams information,
+Ask Me sends matching message excerpts to the configured model to generate a cited answer.
+
+### Stop or restart the model
+
+Stop the model when you want to free its memory. Start the existing container again
+when you need Ask Me. Both commands keep the cached model.
+
+```sh
+docker stop teams-ask-me-qwen-cpu
+docker start teams-ask-me-qwen-cpu
+```

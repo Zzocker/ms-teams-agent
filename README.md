@@ -38,6 +38,7 @@ Download a build from [Releases](https://github.com/Zzocker/ms-teams-agent/relea
 
 - [Installation and building from source](docs/installation.md)
 - [Using Teams and configuration](docs/usage.md)
+- [Set up a local model for Ask Me with Docker](docs/usage.md#set-up-ask-me-with-docker)
 - [Updating the app](docs/updates.md)
 - [Making a release](docs/releasing.md)
 - [Development, headless tooling and profiling](docs/development.md)

@@ -138,9 +138,12 @@ fn open_chat(s: &mut State, tx: &mut Tx) {
         .map(|call| &call.contact)
         .or_else(|| s.calling.finished.as_ref().map(|call| &call.contact));
     s.calling.expanded = false;
-    if let Some(contact) = contact {
-        if s.selected.as_ref() != Some(&contact.chat) {
-            crate::open_chat(s, contact.chat.clone());
+    if let Some(chat) = contact.map(|contact| contact.chat.clone()) {
+        if s.ask_me.open {
+            reveal_conversation(s, &chat);
+        }
+        if s.selected.as_ref() != Some(&chat) {
+            crate::open_chat(s, chat);
         } else {
             notifications::mark_selected_read(s);
         }

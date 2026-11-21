@@ -1,10 +1,20 @@
 //! User preferences, kept separately from the sign-in session.
-use crate::State;
+use crate::{State, model_connection};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub const DEFAULT_PANEL_WIDTH: f32 = 304.0;
 pub type Favorites = BTreeMap<String, BTreeSet<String>>;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Section {
+    #[default]
+    Appearance,
+    AskMe,
+    Updates,
+}
+
+type Preferences = (Option<bool>, f32, Favorites, Option<model_connection::Config>);
 
 pub fn restore(s: &mut State) {
     let Some(dirs) = rune::dirs::AppDirs::new("ms-teams-agent") else {
@@ -13,19 +23,20 @@ pub fn restore(s: &mut State) {
     };
     s.settings_file = Some(dirs.config().join("settings.json"));
     match read(s.settings_file.as_deref().unwrap()) {
-        Ok((theme, width, favorites)) => {
+        Ok((theme, width, favorites, model)) => {
             s.theme = theme;
             s.panel_width = width;
             s.favorites = favorites;
+            if let Some(model) = model { s.model_connection.restore(model); }
         },
         Err(error) => eprintln!("Cannot restore settings: {error}"),
     }
 }
 
-fn read(path: &Path) -> Result<(Option<bool>, f32, Favorites), String> {
+fn read(path: &Path) -> Result<Preferences, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, DEFAULT_PANEL_WIDTH, Favorites::new())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, DEFAULT_PANEL_WIDTH, Favorites::new(), None)),
         Err(error) => return Err(error.to_string()),
     };
     let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -39,7 +50,10 @@ fn read(path: &Path) -> Result<(Option<bool>, f32, Favorites), String> {
         .filter(|width| width.is_finite() && (0.0..=crate::PANEL_MAX as f64).contains(width))
         .map(|width| width as f32).unwrap_or(DEFAULT_PANEL_WIDTH);
     let favorites = serde_json::from_value(value["favorites"].clone()).unwrap_or_default();
-    Ok((theme, width, favorites))
+    let model = &value["ask_me_model"];
+    let model = model["endpoint"].as_str().zip(model["model"].as_str())
+        .and_then(|(endpoint, model)| model_connection::Config::new(endpoint, model).ok());
+    Ok((theme, width, favorites, model))
 }
 
 pub fn set_theme(s: &mut State, theme: Option<bool>) {
@@ -49,16 +63,27 @@ pub fn set_theme(s: &mut State, theme: Option<bool>) {
 
 pub fn save(s: &State) {
     let Some(path) = &s.settings_file else { return; };
-    if let Err(error) = write(path, s.theme, s.panel_width, &s.favorites) {
+    if let Err(error) = write(path, s, s.model_connection.saved.as_ref()) {
         eprintln!("Cannot save settings: {error}");
     }
 }
 
-fn write(path: &Path, theme: Option<bool>, width: f32, favorites: &Favorites) -> std::io::Result<()> {
-    let theme = match theme { None => "system", Some(true) => "dark", Some(false) => "light" };
+pub(crate) fn save_model(s: &State, model: &model_connection::Config) -> std::io::Result<()> {
+    match &s.settings_file {
+        Some(path) => write(path, s, Some(model)),
+        None => Ok(()),
+    }
+}
+
+fn write(path: &Path, s: &State, model: Option<&model_connection::Config>) -> std::io::Result<()> {
+    let theme = match s.theme { None => "system", Some(true) => "dark", Some(false) => "light" };
+    let mut value = serde_json::json!({"theme": theme, "panel_width": s.panel_width, "favorites": s.favorites});
+    if let Some(model) = model {
+        value["ask_me_model"] = serde_json::json!({"endpoint": model.endpoint, "model": model.model});
+    }
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::json!({"theme": theme, "panel_width": width, "favorites": favorites}).to_string())?;
+    std::fs::write(&temporary, value.to_string())?;
     std::fs::rename(temporary, path)
 }
 
@@ -76,7 +101,21 @@ mod tests {
     use super::*;
 
     fn read_preferences(path: &Path) -> Result<(Option<bool>, f32), String> {
-        read(path).map(|(theme, width, _)| (theme, width))
+        read(path).map(|(theme, width, _, _)| (theme, width))
+    }
+
+    #[test]
+    fn model_connection_survives_other_settings_changes() {
+        let directory = std::env::temp_dir().join(format!("teams-settings-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("settings.json");
+        let mut s = crate::init();
+        s.settings_file = Some(path.clone());
+        let model = model_connection::Config::new("http://127.0.0.1:1234/v1/", "model-a").unwrap();
+        save_model(&s, &model).unwrap();
+        s.model_connection.restore(model.clone());
+        set_theme(&mut s, Some(true));
+        assert_eq!(read(&path).unwrap().3, Some(model));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -110,7 +149,7 @@ mod tests {
         let crate::Screen::Main { session, .. } = &mut s.screen else { unreachable!() };
         std::sync::Arc::make_mut(session).user.id = "other".into();
         toggle_favorite(&mut s, "b");
-        let (_, _, restored) = read(&path).unwrap();
+        let (_, _, restored, _) = read(&path).unwrap();
         assert_eq!(restored["me"], BTreeSet::from(["a".into()]));
         assert_eq!(restored["other"], BTreeSet::from(["b".into()]));
         toggle_favorite(&mut s, "b");

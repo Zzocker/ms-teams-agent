@@ -55,6 +55,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
     let selected = rune::oklch(if dark() { 0.34 } else { 0.94 }, 0.035, 266.0);
     let sidebar_surface = rune::oklch(if dark() { 0.255 } else { 0.975 }, 0.009, 266.0);
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary);
+    let ask_me_open = s.ask_me.open;
 
     let show_teams = s.conversation_section == ConversationSection::Teams;
     let matches_filter = |chat: &Chat| chat.channel == show_teams && (!s.unread_only || chat.unread);
@@ -215,7 +216,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
     let search = row().w_full().gap(12.0).items_center().px(16.0).py(8.0).fill(t.card)
         .border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
         .child(row().w(164.0).min_w(164.0).grow(1.0).gap(8.0).items_center()
-            .child(el().key("toggle-sidebar").size(36.0, 36.0).center().radius(7.0)
+            .children((!ask_me_open).then(|| el().key("toggle-sidebar").size(36.0, 36.0).center().radius(7.0)
                 .role("button").label(toggle_sidebar).help(toggle_sidebar).focusable(true)
                 .hover(t.hover).cursor(rune::Cursor::Pointer)
                 .on_press(move |s: &mut State| {
@@ -223,14 +224,14 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
                     if s.panel_width == 0.0 { s.panel_width = settings::DEFAULT_PANEL_WIDTH; }
                     s.sidebar_hidden = !show_conversations;
                 })
-                .child(rune::icon(&SIDEBAR_ICON, 20.0).color(t.text_secondary)))
+                .child(rune::icon(&SIDEBAR_ICON, 20.0).color(t.text_secondary))))
             .child(text("Teams Agent").font(rune::TextStyle::new(16.0, 700.0)).color(t.text)))
         .child(row().key("search-box").items_center().gap(8.0).w_full().max_w(540.0).min_w(0.0).shrink().min_h(36.0)
             .px(10.0).py(5.0).radius(8.0).fill(t.bg).border(1.0, t.separator)
             .child(rune::icon(&SEARCH_ICON, 17.0).color(t.text_secondary))
             .child(text_input(&s.search, type_::BODY).key("search").grow(1.0).min_w(0.0)
                 .label("Search messages, chats, and channels").color(t.text)
-                .placeholder("Search messages, chats, and channels", t.text_secondary)
+                .placeholder(if ask_me_open { "Search Teams" } else { "Search messages, chats, and channels" }, t.text_secondary)
                 .caret(t.text, brand.alpha(0.3))
                 .on_edit(|s: &mut State| &mut s.search)
                 .on_input_change(message_search::preview_changed)
@@ -359,15 +360,21 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
     let rail = col().key("navigation").role("navigation").label("Workspace").w(RAIL_WIDTH).h_full()
         .gap(6.0).px(4.0).py(8.0).fill(t.card).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
         .children([
-            (ConversationSection::Chat, "Chat", "nav-chat", &CHAT_ICON),
-            (ConversationSection::Teams, "Teams", "nav-teams", &TEAMS_ICON),
+            (None, "Ask Me", "nav-ask-me", &super::ask_me::ASK_ME_ICON),
+            (Some(ConversationSection::Chat), "Chat", "nav-chat", &CHAT_ICON),
+            (Some(ConversationSection::Teams), "Teams", "nav-teams", &TEAMS_ICON),
         ].into_iter().map(|(section, label, key, icon)| {
-            let on = s.conversation_section == section;
+            let on = section.map_or(ask_me_open, |section| !ask_me_open && s.conversation_section == section);
             let color = if on { brand } else { t.text_secondary };
             col().key(key).role("button").label(label).checked(on).focusable(true).w_full().min_h(52.0)
                 .center().gap(4.0).radius(8.0).fill(if on { selected } else { t.card })
                 .hover(t.hover).cursor(rune::Cursor::Pointer)
                 .on_press_tx(move |s: &mut State, tx| {
+                    let Some(section) = section else {
+                        super::ask_me::open(s, tx);
+                        return;
+                    };
+                    let leaving_ask_me = s.ask_me.leave();
                     if s.conversation_section != section {
                         s.conversation_section = section;
                         s.unread_only = false;
@@ -375,20 +382,34 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
                     }
                     s.sidebar_hidden = false;
                     if s.panel_width == 0.0 { s.panel_width = settings::DEFAULT_PANEL_WIDTH; }
+                    if leaving_ask_me { notifications::mark_selected_read(s); }
                 })
                 .child(rune::icon(icon, 21.0).color(color))
                 .child(text(label).font(rune::TextStyle::new(11.0, 600.0)).color(color))
         }));
-    let pane = conversation_pane(s, session, is_channel, brand, selected);
-    let body = row().key("workspace").w_full().grow(1.0).min_h(0.0).child(rail)
-        .children((show_sidebar && sidebar_width > 0.0).then_some(sidebar))
-        .children(show_sidebar.then_some(divider))
-        .children((!scoped_search_open || !compact_search).then(|| {
-            col().grow(1.0).shrink().min_w(0.0).min_h(0.0).h_full().children(header).child(pane)
-        }))
-        .children(scoped_search_open.then(|| {
-            super::search::panel(s, &conversations, compact_search, brand)
-        }));
+    let body = row().key("workspace").w_full().grow(1.0).min_h(0.0).child(rail);
+    let body = if ask_me_open {
+        let (width, maximum) = super::ask_me::sidebar_width(s, available_sidebar_width);
+        let compact = cx.layout_with("ask-me", |rect| rect[2] < 500.0).unwrap_or(compact_search);
+        let compact_source = cx.layout_with("workspace", move |rect| {
+            rect[2] - RAIL_WIDTH - width < super::ask_me::SOURCE_AND_TRANSCRIPT_WIDTH
+        }).unwrap_or(compact_search);
+        let source = super::ask_me::source_panel(s, compact_source, brand, selected);
+        body.child(super::ask_me::sidebar(s, width, sidebar_surface, brand, selected))
+            .child(super::ask_me::divider(width, maximum, sidebar_surface))
+            .children((!compact_source || source.is_none()).then(|| super::ask_me::view(s, brand, selected, compact)))
+            .children(source)
+    } else {
+        body.children((show_sidebar && sidebar_width > 0.0).then_some(sidebar))
+            .children(show_sidebar.then_some(divider))
+            .children((!scoped_search_open || !compact_search).then(|| {
+                col().grow(1.0).shrink().min_w(0.0).min_h(0.0).h_full().children(header)
+                    .child(conversation_pane(s, session, is_channel, brand, selected))
+            }))
+            .children(scoped_search_open.then(|| {
+                super::search::panel(s, &conversations, compact_search, brand)
+            }))
+    };
     // Rune's modal scope includes later siblings, so keep the background outside search inert.
     let body = if query.is_empty() && !global_search_open { body } else { body.inert() };
     let search = if global_search_open { search.inert() } else { search };
@@ -745,6 +766,9 @@ pub(crate) fn search_key(s: &mut State, e: &rune::KeyEvent, tx: &mut Tx) -> bool
     }
     if e.key == rune::Key::Escape && s.message_search.open && s.search.text.is_empty() {
         super::search::close(s, tx);
+        return true;
+    }
+    if e.key == rune::Key::Escape && s.search.text.is_empty() && super::ask_me::close_source(s, tx) {
         return true;
     }
     if !rune::Keybind::new("ctrl+e").matches_tx(e, tx)
