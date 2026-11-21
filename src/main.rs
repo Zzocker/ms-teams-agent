@@ -4,6 +4,7 @@
 mod actions;
 mod attachments;
 mod history;
+mod insights;
 mod auth;
 mod avatars;
 #[cfg(feature = "call-audio")]
@@ -78,6 +79,7 @@ struct State {
     reply_highlight: Option<(String, std::time::Instant)>,
     reply_highlight_on: bool,
     conversation_section: ConversationSection,
+    insights: insights::Insights,
     unread_only: bool,
     sidebar_hidden: bool,
     favorites: settings::Favorites,
@@ -182,6 +184,7 @@ fn init() -> State {
         reply_highlight: None,
         reply_highlight_on: false,
         conversation_section: ConversationSection::Chat,
+        insights: Default::default(),
         unread_only: false,
         sidebar_hidden: false,
         favorites: Default::default(),
@@ -266,7 +269,7 @@ fn reply_blink(elapsed: f32) -> Option<bool> {
     (elapsed < 1.8).then(|| (elapsed / 0.3) as u32 % 2 == 0)
 }
 
-fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
+fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     let mut changed = releases::poll(s);
     #[cfg(feature = "call-audio")]
     { changed |= s.calling.poll(tx); }
@@ -371,6 +374,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     }
     if let Some((id, deleted, r)) = s.deleter.take() {
         history::invalidate(s, &id);
+        if r.is_ok() { insights::invalidate(s, &id); }
         match r {
             Ok(()) => if let (true, Some(Ok(page))) = (s.selected.as_ref() == Some(&id), &mut s.messages) {
                 let mut deleted = deleted;
@@ -385,6 +389,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     }
     if let Some((id, msg_id, r)) = s.sender.take() {
         history::invalidate(s, &id);
+        if r.is_ok() { insights::invalidate(s, &id); }
         let here = s.selected.as_ref() == Some(&id);
         let r = r.map(|(fresh, urls)| {
             // The server's copy names the uploads; show them from the pasted pixels, not a download.
@@ -469,6 +474,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         tx.wake_after(std::time::Duration::from_secs(60));
     }
     changed |= message_search::poll(s, tx);
+    changed |= insights::poll(s, now, tx);
     let revealed = reveal_reply(s, tx);
     changed || revealed
 }

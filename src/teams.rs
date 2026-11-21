@@ -4,6 +4,7 @@
 use crate::auth::{Session, User, agent};
 use serde_json::Value;
 use std::ops::Range;
+use std::time::Duration;
 
 mod html;
 #[cfg(feature = "call-audio")]
@@ -323,8 +324,7 @@ pub struct Page {
 }
 
 pub fn messages(s: &Session, chat_id: &str) -> Result<Page, String> {
-    let v = get(s, &format!("conversations/{}/messages?view=msnp24Equivalent&pageSize=50&startTime=1", encode(chat_id)))?;
-    Ok(page(&v, &s.user.id))
+    history_page(s, HistoryPage::First(chat_id)).map_err(|error| error.message)
 }
 
 pub fn mark_read(s: &Session, chat_id: &str, horizon: &ReadHorizon) -> Result<(), String> {
@@ -344,15 +344,87 @@ fn read_marker(horizon: &ReadHorizon, read_at: u128) -> Value {
 
 /// The page `link` (a [`Page::older`]) points to.
 pub fn older(s: &Session, link: &str) -> Result<Page, String> {
-    // The link carries our token, so only follow it to the chat service.
-    if !link.starts_with(&s.chat_service) {
-        return Err("unexpected link for older messages".into());
-    }
-    Ok(page(&answer(agent().get(link).header("Authentication", &auth(s)).call())?, &s.user.id))
+    history_page(s, HistoryPage::Older(link)).map_err(|error| error.message)
+}
+
+pub(crate) enum HistoryPage<'a> {
+    First(&'a str),
+    Older(&'a str),
+}
+
+pub(crate) struct HistoryPageError {
+    message: String,
+    pub retry_after: Option<Duration>,
+}
+
+pub(crate) fn history_page(s: &Session, cursor: HistoryPage<'_>) -> Result<Page, HistoryPageError> {
+    let first_page;
+    let link = match cursor {
+        HistoryPage::First(chat_id) => {
+            first_page = url(
+                s,
+                &format!(
+                    "conversations/{}/messages?view=msnp24Equivalent&pageSize=50&startTime=1",
+                    encode(chat_id)
+                ),
+            );
+            first_page.as_str()
+        }
+        HistoryPage::Older(link) => {
+            // The link carries our token, so only follow paths on the chat service.
+            if !link
+                .strip_prefix(s.chat_service.trim_end_matches('/'))
+                .is_some_and(|path| path.starts_with('/'))
+            {
+                return Err(HistoryPageError {
+                    message: "unexpected link for older messages".into(),
+                    retry_after: None,
+                });
+            }
+            link
+        }
+    };
+    let response = agent().get(link).header("Authentication", &auth(s)).call();
+    let retry_after = match &response {
+        Ok(response) if matches!(response.status().as_u16(), 408 | 429 | 500 | 502..=504) => Some(
+            response
+                .headers()
+                .get("Retry-After")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| {
+                    value.parse().ok().map(Duration::from_secs).or_else(|| {
+                        let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+                        Some(
+                            (date.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                                .to_std()
+                                .unwrap_or_default(),
+                        )
+                    })
+                })
+                .unwrap_or_default(),
+        ),
+        Err(ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed | ureq::Error::Io(_)) => {
+            Some(Duration::ZERO)
+        }
+        _ => None,
+    };
+    answer(response)
+        .map(|v| page(&v, &s.user.id))
+        .map_err(|message| HistoryPageError {
+            message,
+            retry_after,
+        })
 }
 
 fn page(v: &Value, me: &str) -> Page {
-    Page { msgs: parse_messages(v, me), older: v["_metadata"]["backwardLink"].as_str().map(Into::into) }
+    Page {
+        msgs: parse_messages(v, me),
+        older: v["_metadata"]["backwardLink"]
+            .as_str()
+            .map(str::trim)
+            .filter(|link| !link.is_empty())
+            .map(Into::into),
+    }
 }
 
 /// A path segment, percent-encoded as JavaScript's `encodeURIComponent` does.

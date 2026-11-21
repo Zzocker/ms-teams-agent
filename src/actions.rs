@@ -49,6 +49,7 @@ pub(crate) fn sign_out(s: &mut State) {
     s.deleter.cancel();
     s.reactor.cancel();
     s.avatars = Default::default();
+    s.insights = Default::default();
     #[cfg(feature = "image")]
     { s.images = Default::default(); }
     #[cfg(feature = "image")]
@@ -154,6 +155,7 @@ pub(crate) fn open_chat(s: &mut State, id: String) {
 
 /// Reveal a quoted message or a search result, following older pages as needed.
 pub(crate) fn reveal_reply(s: &mut State, tx: &mut Tx) -> bool {
+    if s.conversation_section == ConversationSection::Analytics { return false; }
     let Some(target) = s.reply_target.as_deref() else { return false };
     if s.messages.as_ref().is_some_and(Result::is_err) {
         s.reply_target = None;

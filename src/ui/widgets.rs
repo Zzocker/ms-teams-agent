@@ -20,7 +20,7 @@ pub(crate) fn avatar(name: &str, size: f32) -> El {
 
 pub(crate) fn chat_avatar_id<'a>(chat: &'a Chat, me: &'a str) -> &'a str {
     if !chat.avatar_id.is_empty() { &chat.avatar_id }
-    else if chat.id == "48:notes" { me }
+    else if chat.id == teams::NOTES { me }
     else { teams::peer(&chat.id, me).unwrap_or("") }
 }
 
