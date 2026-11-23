@@ -41,6 +41,7 @@ def package(platform, arch, binary, output):
                     "CFBundleExecutable": "ms-teams-agent", "CFBundlePackageType": "APPL",
                     "CFBundleShortVersionString": version, "CFBundleVersion": version,
                     "CFBundleIconFile": "icon.icns", "NSHighResolutionCapable": True,
+                    "NSMicrophoneUsageDescription": "Teams Agent uses your microphone during audio calls.",
                 }, stream)
         else:
             executable = folder / ("ms-teams-agent.exe" if platform == "windows" else "ms-teams-agent")

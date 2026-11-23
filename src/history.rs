@@ -26,6 +26,10 @@ impl History {
         self.0.push_back(entry);
     }
 
+    pub fn page(&self, id: &str) -> Option<&Page> {
+        self.0.iter().find(|(key, ..)| key == id).map(|(_, page, _)| page)
+    }
+
     pub fn page_mut(&mut self, id: &str) -> Option<&mut Page> {
         self.0.iter_mut().find(|(key, ..)| key == id).map(|(_, page, _)| page)
     }

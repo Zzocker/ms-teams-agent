@@ -22,13 +22,15 @@ Download a build from [Releases](https://github.com/Zzocker/ms-teams-agent/relea
 - [x] Message formatting and code blocks
 - [x] Paste and send images; view shared images
 - [x] View shared file cards and open file links
-- [x] Search loaded chats and channels by name
+- [x] See matching messages, chats, and channels as you type, or press Enter to open the full message results pop-up
+- [x] Find messages as you type in the open chat or channel with Ctrl+F (⌘F on macOS)
+- [x] Open a search result in context and continue into older pages with **Search more history**
 - [ ] Start new chats and create group chats
 - [ ] Search message history
 - [x] Attach documents and other device files in chats through OneDrive (up to 100 MiB each)
 - [x] Message reactions (six quick choices; existing reaction counts)
 - [ ] Presence and typing indicators
-- [ ] Voice and video calls
+- [ ] Voice and video calls ([experimental outgoing audio](docs/development.md#experimental-audio-calling))
 - [ ] Calendar and meetings
 - [ ] Favorites and pinned chats
 

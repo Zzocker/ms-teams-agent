@@ -1,6 +1,6 @@
 [package]
 name = "ms-teams-agent"
-version = "1.3.2"
+version = "1.3.3"
 edition = "2024"
 
 [dependencies]
@@ -17,17 +17,22 @@ flate2 = "1"
 uuid = { version = "1", features = ["v4"] }
 tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 pulldown-cmark = { version = "0.13", default-features = false, optional = true }
+gstreamer = { version = "0.25", optional = true }
+gstreamer-sdp = { version = "0.25", optional = true }
+gstreamer-webrtc = { version = "0.25", optional = true }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus = "6"
 futures-lite = "2"
 
 [features]
-default = ["image", "markdown"]
+default = ["image", "markdown", "call-audio"]
 # Show pictures in messages (pasted screenshots, image files). Off: they show as "[image]".
 image = ["dep:png"]
 # Format Markdown in messages (bold, italic, code, lists, headings). Off: shown as typed.
 markdown = ["dep:pulldown-cmark"]
+# Enable experimental outgoing Teams audio calls.
+call-audio = ["dep:gstreamer", "dep:gstreamer-sdp", "dep:gstreamer-webrtc"]
 
 # Rune's own patches; a dependency's [patch] doesn't reach us (rune README, "Depending on Rune").
 [patch.crates-io]

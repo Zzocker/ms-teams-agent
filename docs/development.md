@@ -25,6 +25,23 @@ The test clicks **Copy text**, checks the clipboard, pastes into the composer, a
 app state. It also writes the pasted text to `/tmp/copy-link.png.txt`. The `copy-link` demo scene
 shows the source message with its copy menu open.
 
+## Experimental audio calling
+
+Default builds include experimental outgoing audio calls. Install the GStreamer prerequisites
+for your platform before building. See the [installation guide](installation.md).
+
+```sh
+cargo build --locked
+```
+
+Select **Start audio call** in a one-to-one chat to open the call screen. It shows the
+contact, connection status, and elapsed time. Use **Mute** or press **Ctrl+Shift+M**
+(**⌘⇧M** on macOS). Select **Chat** to go back to the conversation. The compact call bar
+stays visible while you browse, with **Return to call**, mute, and hang-up controls.
+
+Default builds embed the ringback recording for local playback while dialing.
+[Microsoft Teams outgoing call tone](https://statics.teams.cdn.office.net/evergreen-assets/audio/tfl-tactile-sounds/desktop/default-consumer/v2/ringtones/outgoing/outgoing-ringtone-level30.mp3)
+
 ## Profile the real app (Linux)
 
 Sign in with the normal app first, then run from a graphical desktop session:

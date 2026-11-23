@@ -222,9 +222,9 @@ mod tests {
 
     #[test]
     fn drawn_media_rows_follow_scrolling() {
-        fn view(s: &State, _: &mut Cx<State>) -> El {
+        fn view(s: &State, cx: &mut Cx<State>) -> El {
             let Screen::Main { session, chats } = &s.screen else { unreachable!() };
-            main_view(s, session, chats)
+            main_view(s, session, chats, cx)
         }
         let mut s = init();
         demo(&mut s);

@@ -6,6 +6,10 @@ mod attachments;
 mod history;
 mod auth;
 mod avatars;
+#[cfg(feature = "call-audio")]
+mod call_audio;
+#[cfg(feature = "call-audio")]
+mod calling;
 mod demo;
 #[cfg(feature = "image")]
 mod images;
@@ -14,6 +18,7 @@ mod markdown;
 mod teams;
 mod notifications;
 mod message_state;
+mod message_search;
 mod releases;
 mod settings;
 mod ui;
@@ -41,6 +46,8 @@ enum Screen {
 type Messages = Result<Page, String>;
 
 struct State {
+    #[cfg(feature = "call-audio")]
+    calling: calling::Calling,
     message_state: message_state::MessageState,
     release_loader: Latest<Result<Option<releases::Release>, String>>,
     release_status: releases::Status,
@@ -64,10 +71,16 @@ struct State {
     #[cfg_attr(not(feature = "image"), allow(dead_code))]
     viewer: Option<String>,
     reply_target: Option<String>,
+    search_jump: bool,
+    message_search: message_search::Search,
+    search_preview: message_search::Preview,
     reply_error: Option<String>,
     reply_highlight: Option<(String, std::time::Instant)>,
     reply_highlight_on: bool,
-    show_teams: bool,
+    conversation_section: ConversationSection,
+    unread_only: bool,
+    sidebar_hidden: bool,
+    favorites: settings::Favorites,
     teams: Option<Result<Vec<teams::Team>, String>>,
     pending_channels: Vec<Chat>,
     teams_loader: Latest<Result<Vec<teams::Team>, String>>,
@@ -140,6 +153,8 @@ struct State {
 
 fn init() -> State {
     State {
+        #[cfg(feature = "call-audio")]
+        calling: Default::default(),
         message_state: Default::default(),
         release_loader: Latest::default(),
         release_status: releases::Status::Idle,
@@ -160,10 +175,16 @@ fn init() -> State {
         settings_file: None,
         viewer: None,
         reply_target: None,
+        search_jump: false,
+        message_search: Default::default(),
+        search_preview: Default::default(),
         reply_error: None,
         reply_highlight: None,
         reply_highlight_on: false,
-        show_teams: false,
+        conversation_section: ConversationSection::Chat,
+        unread_only: false,
+        sidebar_hidden: false,
+        favorites: Default::default(),
         teams: None,
         teams_loader: Latest::default(),
         pending_channels: Vec::new(),
@@ -227,12 +248,14 @@ fn setup(s: &mut State, waker: Waker) {
     s.file_download.set_waker(waker.clone());
     s.mentions.setup(waker.clone());
     s.older_loader.set_waker(waker.clone());
+    s.message_search.set_waker(waker.clone());
+    s.search_preview.set_waker(waker.clone());
     s.deleter.set_waker(waker.clone());
     s.reactor.set_waker(waker.clone());
     s.reader.set_waker(waker.clone());
     s.release_loader.set_waker(waker.clone());
     s.waker = Some(waker);
-    // The app has no arguments of its own; any argument is Rune's headless tooling, which gets no network.
+    // Rune's headless tooling skips network sign-in.
     if !cfg!(test) && std::env::args().len() == 1 {
         notifications::start(s);
         sign_in(s, false);
@@ -245,6 +268,8 @@ fn reply_blink(elapsed: f32) -> Option<bool> {
 
 fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     let mut changed = releases::poll(s);
+    #[cfg(feature = "call-audio")]
+    { changed |= s.calling.poll(tx); }
     if let Some(result) = s.file_download.take() {
         if let Err(e) = result { s.send_error = Some(format!("Attachment not saved: {e}")); }
         changed = true;
@@ -272,7 +297,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
             for chat in old {
                 if let Some(named) = named.iter().find(|c| c.id == chat.id) {
                     chat.title = named.title.clone();
-                    chat.avatar_id = named.avatar_id.clone();
+                    if chat.avatar_id.is_empty() { chat.avatar_id.clone_from(&named.avatar_id); }
                     chat.avatar_members = named.avatar_members.clone();
                 }
             }
@@ -281,6 +306,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
                 s.prefetch_queue = chats.iter().take(10).map(|c| c.id.clone()).collect();
             }
             s.screen = screen;
+            load_teams(s);
         }
         changed = true;
     }
@@ -323,7 +349,8 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         if s.selected.as_ref() == Some(&id) && s.reply_target.is_some() {
             if let Err(e) = &r {
                 s.reply_target = None;
-                s.reply_error = Some(format!("Could not load the quoted message: {e}"));
+                let title = if std::mem::take(&mut s.search_jump) { "the search result" } else { "the quoted message" };
+                s.reply_error = Some(format!("Could not load {title}: {e}"));
                 changed = true;
             }
         }
@@ -441,6 +468,7 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         }
         tx.wake_after(std::time::Duration::from_secs(60));
     }
+    changed |= message_search::poll(s, tx);
     let revealed = reveal_reply(s, tx);
     changed || revealed
 }
@@ -473,6 +501,8 @@ fn rest(s: &mut State, _: &mut Tx) -> bool {
 
 fn view(s: &State, cx: &mut Cx<State>) -> El {
     DARK.with(|d| d.set(s.theme.unwrap_or_else(|| cx.system_dark())));
+    #[cfg(feature = "call-audio")]
+    let call_screen = ui::call::screen(s);
     let t = tok::theme(dark());
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary).wrap();
     let page = col().w_full().h_full().center().gap(14.0).padding(32.0).fill(t.bg);
@@ -494,15 +524,35 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                 s.screen = Screen::Login(None);
             })),
         // Over the chat, not instead of it, so closing it leaves the messages scrolled where they were.
-        Screen::Main { session, chats } => main_view(s, session, chats)
+        Screen::Main { session, chats } => main_view(s, session, chats, cx)
             .children(image_viewer(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))))
             .children(draft_editor(s).map(|v| v.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))))
             .children(message_menu(s)),
     };
-    col().w_full().h_full().child(content.grow(1.0).min_h(0.0))
+    let layout = col().w_full().h_full().child(content.grow(1.0).min_h(0.0))
         .children((!matches!(s.screen, Screen::Main { .. })).then(||
             releases::nav_button(s).w(44.0).pin(Some(12.0), Some(12.0), None, None)))
-        .children(releases::panel(s))
+        .children(releases::panel(s));
+    #[cfg(feature = "call-audio")]
+    if let Some(screen) = call_screen {
+        return col().w_full().h_full()
+            .child(layout.inert().a11y_hidden())
+            .child(screen.pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)));
+    }
+    layout
+}
+
+fn app_key(s: &mut State, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    #[cfg(feature = "call-audio")]
+    {
+        if rune::Keybind::new("mod+shift+m").matches_tx(event, tx) && s.calling.toggle_mute() {
+            return true;
+        }
+        if s.calling.expanded {
+            return false;
+        }
+    }
+    search_key(s, event, tx)
 }
 
 fn main() {
@@ -515,13 +565,17 @@ fn main() {
         scenes: SCENES,
         setup: Some(setup),
         poll: Some(poll),
-        on_key: Some(search_key),
+        on_key: Some(app_key),
         min_size: Some((640.0, 400.0)),
         families: ("Inter", "ui-monospace"),
-        ..AppSpec::new("Teams", (1000.0, 680.0), init, view)
+        ..AppSpec::new("Teams Agent", (1000.0, 680.0), init, view)
     }).on_focus(notifications::focus).on_visibility(notifications::visibility).on_rest(rest)
         .on_close(|s, _| { s.window_visible = false; s.window_focused = false; })
-        .on_quit(|s, _| { s.attempt.fetch_add(1, SeqCst); });
+        .on_quit(|s, _| {
+            #[cfg(feature = "call-audio")]
+            s.calling.quit();
+            s.attempt.fetch_add(1, SeqCst);
+        });
     let handle = app.handle();
     app = app.init(move || {
         let mut s = init();

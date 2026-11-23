@@ -37,7 +37,9 @@ class Packages(unittest.TestCase):
                         self.assertEqual(stream.getmember(executable).mode & 0o777, 0o755)
                         if platform == 'macos':
                             info = next(n for n in files if n.endswith('/Info.plist'))
-                            self.assertEqual(plistlib.load(stream.extractfile(info))['CFBundleExecutable'], 'ms-teams-agent')
+                            plist = plistlib.load(stream.extractfile(info))
+                            self.assertEqual(plist['CFBundleExecutable'], 'ms-teams-agent')
+                            self.assertTrue(plist['NSMicrophoneUsageDescription'])
                             icon = next(n for n in files if n.endswith('/icon.icns'))
                             self.assertTrue(stream.extractfile(icon).read().startswith(b'icns'))
                         else:

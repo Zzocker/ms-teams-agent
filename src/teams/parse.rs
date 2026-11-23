@@ -89,8 +89,19 @@ pub(super) fn parse_conversations(v: &Value, me: &User) -> Vec<Chat> {
                 title: title.into(),
                 avatar_members: Vec::new(),
                 avatar_id: {
+                    let other = c["id"].as_str().and_then(|id| peer(id, &me.id));
+                    let bot_member = [&c["members"], &c["threadProperties"]["members"]].into_iter()
+                        .filter_map(Value::as_array).flatten()
+                        .filter_map(|member| member["id"].as_str().or_else(|| member.as_str()))
+                        .find(|id| {
+                            id.strip_prefix("28:").is_some_and(|bot| {
+                                other.is_some_and(|peer| bot.eq_ignore_ascii_case(peer))
+                            })
+                        });
                     let sender = avatar_id(last["from"].as_str().unwrap_or(""));
-                    if sender.starts_with("28:") { sender } else { String::new() }
+                    if let Some(bot) = bot_member { bot.into() }
+                    else if sender.starts_with("28:") { sender }
+                    else { String::new() }
                 },
                 preview: {
                     let content = html_to_text(last["content"].as_str().unwrap_or(""));
@@ -127,6 +138,17 @@ pub(super) fn chat_unread(chat: &Value, me: &str) -> bool {
 }
 
 /// Oldest first; only messages people wrote (not typing, joins, renames, calls).
+/// A channel conversation link can address one post and its thread.
+pub(super) fn channel_thread(id: &str) -> Option<(&str, &str)> {
+    let (channel, root) = id.split_once(";messageid=")?;
+    (channel.ends_with("@thread.tacv2") || channel.ends_with("@thread.skype"))
+        .then_some((channel, root))
+}
+
+pub(super) fn thread_root_id(root: &str, server_id: &str, client_id: &str) -> Option<String> {
+    (!root.is_empty() && root != "0" && root != server_id && root != client_id).then(|| root.to_owned())
+}
+
 pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
     let empty = vec![];
     let mut msgs: Vec<Msg> = v["messages"].as_array().unwrap_or(&empty).iter()
@@ -142,9 +164,12 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
             let mentions = if deleted { vec![] } else { parsed_mentions(m, &mut links) };
             let images = if deleted { vec![] } else { images(m, raw) };
             let files = if deleted { vec![] } else { files(m) };
+            let server_id = m["id"].as_str().unwrap_or("");
+            let id = m["clientmessageid"].as_str().unwrap_or(server_id);
+            let thread_root = m["rootMessageId"].as_str().and_then(|root| thread_root_id(root, server_id, id));
             Some(Msg {
-                id: m["clientmessageid"].as_str().or(m["id"].as_str()).unwrap_or("").into(),
-                server_id: m["id"].as_str().unwrap_or("").into(),
+                id: id.into(),
+                server_id: server_id.into(),
                 sender: m["imdisplayname"].as_str().unwrap_or("").into(),
                 sender_id: avatar_id(m["from"].as_str().unwrap_or("")),
                 deleted,
@@ -153,6 +178,7 @@ pub fn parse_messages(v: &Value, me: &str) -> Vec<Msg> {
                 time: m["composetime"].as_str().unwrap_or("").into(),
                 mine: !me.is_empty() && m["from"].as_str().unwrap_or("").ends_with(me),
                 reply,
+                thread_root,
                 images,
                 links,
                 files,
@@ -235,6 +261,14 @@ mod tests {
             "id": "19:me_bot@unq.gbl.spaces",
             "lastMessage": {"from": from, "imdisplayname": "GitHub Notifications"}
         }]}), &crate::auth::User::default());
+        assert_eq!(chats[0].avatar_id, mri);
+        let me = User { id: "11111111-1111-4111-8111-111111111111".into(), ..User::default() };
+        let thread = format!("19:{}_{}@unq.gbl.spaces", me.id, mri.strip_prefix("28:").unwrap());
+        let chats = super::parse_chats(&serde_json::json!({"conversations": [{
+            "id": thread,
+            "members": [{"id": mri}],
+            "lastMessage": {"from": format!("8:orgid:{}", me.id)}
+        }]}), &me);
         assert_eq!(chats[0].avatar_id, mri);
         let messages = super::parse_messages(&serde_json::json!({"messages": [{
             "from": from, "messagetype": "Text", "content": "Notification"

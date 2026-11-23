@@ -178,7 +178,7 @@ mod tests {
         assert!(s.mentions.people.is_none());
         assert!(s.draft.pills().next().is_none());
         ready(&mut s);
-        navigate(&mut s, false);
+        open_chat(&mut s, "third-chat".into());
         assert!(s.mentions.people.is_none());
     }
 

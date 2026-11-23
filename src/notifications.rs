@@ -65,14 +65,10 @@ fn notification_current(s: &State, attempt: u64, id: &str) -> bool {
 
 fn open_notification(s: &mut State, attempt: u64, id: &str, token: Option<&str>) {
     if !notification_current(s, attempt, id) { return; }
-    let channel = conversation(s, id).is_some_and(|c| c.channel);
-    if s.show_teams != channel { navigate(s, channel); }
-    if channel && let Some(Ok(teams)) = &s.teams {
-        for team in teams.iter().filter(|t| t.channels.iter().any(|c| c.id == id)) {
-            s.collapsed_teams.remove(&team.id);
-        }
-    }
-    s.search.clear();
+    #[cfg(feature = "call-audio")]
+    { s.calling.expanded = false; }
+    reveal_conversation(s, id);
+    message_search::clear_top(s);
     s.viewer = None;
     s.editor = false;
     open_chat(s, id.to_owned());
@@ -83,8 +79,9 @@ fn open_notification(s: &mut State, attempt: u64, id: &str, token: Option<&str>)
 }
 
 pub fn chat_open(s: &State, id: &str) -> bool {
+    #[cfg(feature = "call-audio")]
+    if s.calling.expanded { return false; }
     s.window_focused && s.window_visible && s.selected.as_deref() == Some(id)
-        && s.show_teams == conversation(s, id).is_some_and(|c| c.channel)
 }
 
 pub(crate) fn conversation<'a>(s: &'a State, id: &str) -> Option<&'a Chat> {
@@ -180,7 +177,7 @@ fn reconcile(s: &mut State, fresh: Vec<Chat>) {
             let arrived = chat.time > old.time;
             chat.latest = old.latest.iter().chain(&chat.latest).max_by_key(|h| h.server_id).cloned();
             chat.title = old.title.clone();
-            chat.avatar_id = old.avatar_id.clone();
+            if chat.avatar_id.is_empty() { chat.avatar_id.clone_from(&old.avatar_id); }
             chat.avatar_members = old.avatar_members.clone();
             if arrived && chat.unread { notices.push(chat.clone()); }
             reload |= arrived && selected.as_ref() == Some(&chat.id);
@@ -217,7 +214,7 @@ fn receive(s: &mut State, mut chat: Chat, message: Option<Msg>, server_id: &str,
     if let Some(i) = prior {
         let old = &chats[i];
         chat.title = old.title.clone();
-        chat.avatar_id = old.avatar_id.clone();
+        if chat.avatar_id.is_empty() { chat.avatar_id.clone_from(&old.avatar_id); }
         chat.avatar_members = old.avatar_members.clone();
         chat.unread = old.unread || arrived;
         chat.latest = old.latest.iter().chain(&chat.latest).max_by_key(|h| h.server_id).cloned();
@@ -497,7 +494,7 @@ mod tests {
         assert_eq!(notices.try_iter().count(), 1);
         assert_eq!(conversation(&s, &chat.id).unwrap().title, "General");
         s.selected = Some(chat.id.clone());
-        s.show_teams = true;
+        s.conversation_section = ConversationSection::Chat;
         s.window_focused = true;
         s.window_visible = true;
         s.messages = Some(Ok(Page { msgs: vec![], older: None }));
@@ -515,14 +512,15 @@ mod tests {
     }
 
     #[test]
-    fn channel_notification_selects_teams_and_expands_its_team() {
+    fn channel_notification_reveals_channel_and_expands_its_team() {
         let mut s = signed_in();
+        s.conversation_section = ConversationSection::Chat;
         set_teams(&mut s, Ok(vec![team()]));
         s.collapsed_teams.insert("team".into());
         let id = s.teams.as_ref().unwrap().as_ref().unwrap()[0].channels[0].id.clone();
         assert!(notification_current(&s, 0, &id));
         open_notification(&mut s, 0, &id, Some("activation-token"));
-        assert!(s.show_teams);
+        assert_eq!(s.conversation_section, ConversationSection::Teams);
         assert_eq!(s.selected.as_deref(), Some(id.as_str()));
         assert!(!s.collapsed_teams.contains("team"));
         let Screen::Main { chats, .. } = &s.screen else { panic!() };

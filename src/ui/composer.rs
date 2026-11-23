@@ -65,13 +65,35 @@ pub(crate) fn editor_split(start: f32, delta: f32, width: f32) -> f32 {
     (start + delta / width).clamp(0.2, 0.9)
 }
 
+pub(crate) fn compose_placeholder(s: &State, is_channel: bool) -> &'static str {
+    if !is_channel { "Type a message" }
+    else if s.editing.is_some() { "Edit post…" }
+    else if s.replying.is_some() { "Write a reply…" }
+    else { "Write a post…" }
+}
+
+pub(crate) fn compose_action_label(s: &State, is_channel: bool) -> &'static str {
+    if s.sender.is_pending() {
+        if is_channel { "Posting…" } else { "Sending…" }
+    } else if !is_channel {
+        "Send"
+    } else if s.editing.is_some() {
+        "Save"
+    } else if s.replying.is_some() {
+        "Reply"
+    } else {
+        "Post"
+    }
+}
+
 /// The draft in a pop-up editor: the raw text on the left and, when on, how it will read on the
 /// right, split by a divider that drags. Escape or a click outside closes it; the draft stays.
 pub(crate) fn draft_editor(s: &State) -> Option<El> {
     if !s.editor { return None }
+    let is_channel = s.selected.as_deref().and_then(|id| notifications::conversation(s, id)).is_some_and(|chat| chat.channel);
     let t = tok::theme(dark());
     let input = draft_paste(text_input(&s.draft, type_::BODY).key("editor-draft").label("Message").color(t.text)
-        .placeholder("Type a message", t.text_secondary)
+        .placeholder(compose_placeholder(s, is_channel), t.text_secondary)
         .caret(t.text, tok::accent(0, dark()).alpha(0.3))
         .autofocus()
         .on_edit(|s: &mut State| &mut s.draft)
@@ -120,10 +142,10 @@ pub(crate) fn draft_editor(s: &State) -> Option<El> {
             .child(body)
             .children(crate::attachments::draft_files(s))
             .child(row().w_full().justify_end().px(16.0).py(10.0).border_sides([1.0, 0.0, 0.0, 0.0], t.separator)
-                .children(s.editing.is_none().then(|| el().key("editor-attach-file").role("button").label("Attach file from this device").focusable(true)
+                .children((!is_channel && s.editing.is_none()).then(|| el().key("editor-attach-file").role("button").label("Attach file from this device").focusable(true)
                     .cursor(rune::Cursor::Pointer).padding(8.0).on_press_tx(crate::attachments::pick_file)
                     .child(text("📎 Attach file").font(type_::LABEL).color(t.text))))
-                .child(button("editor-send", "Send", true, |s| { s.editor = false; send(s) })))))
+                .child(button("editor-send", compose_action_label(s, is_channel), true, |s| { s.editor = false; send(s) })))))
 }
 
 #[cfg(test)]

@@ -92,15 +92,14 @@ pub fn nav_button(s: &State) -> El {
     };
     let t = tok::theme(dark());
     let pending = s.release_loader.is_pending();
-    col().key("settings-control").role("button").label("Settings").focusable(true)
-        .w_full().center().gap(4.0).py(10.0).radius(6.0).hover(t.hover)
-        .fill(if s.settings_panel { t.press } else { t.bg }).cursor(rune::Cursor::Pointer)
+    el().key("settings-control").role("button").label("Settings").help("Settings").focusable(true)
+        .size(36.0, 36.0).center().radius(7.0).hover(t.hover)
+        .fill(if s.settings_panel { t.press } else { t.card }).cursor(rune::Cursor::Pointer)
         .on_press(open)
-        .child(rune::icon(&SETTINGS_ICON, 24.0).color(t.text))
-        .child(text("Settings").font(type_::LABEL).color(t.text))
+        .child(rune::icon(&SETTINGS_ICON, 21.0).color(t.text_secondary))
         .children((!pending && matches!(s.release_status, Status::Available(_))).then(||
-            el().size(6.0, 6.0).radius(3.0).fill(tok::accent(0, dark()))
-                .pin(None, Some(6.0), Some(10.0), None)))
+            el().size(7.0, 7.0).radius(4.0).fill(tok::accent(0, dark()))
+                .pin(None, Some(4.0), Some(4.0), None)))
 }
 
 #[cfg(target_os = "linux")]
@@ -217,7 +216,7 @@ mod tests {
         let elements = rt.elements();
         let theme = elements.iter().find(|e| e.key.as_deref() == Some("theme")).unwrap();
         let updates = elements.iter().find(|e| e.key.as_deref() == Some("settings-control")).unwrap();
-        assert!(updates.rect[0] < 68.0, "settings belongs in the rail");
+        assert!(updates.rect[1] < 48.0, "settings belongs in the top bar");
         let theme_rect = theme.rect;
         let previous_theme = rt.state.theme;
         rt.pointer_down(theme_rect[0] + 10.0, theme_rect[1] + 10.0);

@@ -36,6 +36,8 @@ pub(crate) fn sign_in(s: &mut State, interactive: bool) {
 }
 
 pub(crate) fn sign_out(s: &mut State) {
+    #[cfg(feature = "call-audio")]
+    { s.calling = Default::default(); }
     s.message_state.clear();
     s.mentions.reset();
     s.history = Default::default();
@@ -65,7 +67,9 @@ pub(crate) fn sign_out(s: &mut State) {
     s.teams_loader.cancel();
     s.teams = None;
     s.pending_channels.clear();
-    s.show_teams = false;
+    s.conversation_section = ConversationSection::Chat;
+    s.unread_only = false;
+    s.sidebar_hidden = false;
     s.collapsed_teams.clear();
     s.loader.cancel();
     s.sender.cancel();
@@ -76,49 +80,49 @@ pub(crate) fn sign_out(s: &mut State) {
     s.editing = None;
     s.editor = false;
     (s.replying, s.menu, s.deleting) = (None, None, None);
-    s.search.clear();
+    message_search::clear_top(s);
+    s.message_search.close();
+    s.search_jump = false;
     s.send_error = None;
     auth::sign_out();
     (s.selected, s.messages) = (None, None);
     s.screen = Screen::Login(None);
 }
 
-pub(crate) fn navigate(s: &mut State, teams: bool) {
-    s.attached.clear();
-    s.pasted.clear();
-    s.mentions.reset();
-    history::remember_selected(s);
-    s.restore_scroll = None;
-    #[cfg(feature = "image")]
-    s.preview_rows.clear();
-    s.reply_highlight = None;
-    s.reply_target = None;
-    s.reply_error = None;
-    s.show_teams = teams;
-    s.search.clear();
-    s.loader.cancel();
-    s.older_loader.cancel();
-    s.selected = None;
-    s.messages = None;
-    s.draft.clear();
-    s.editing = None;
-    s.editor = false;
-    (s.replying, s.menu, s.deleting) = (None, None, None);
-    s.send_error = None;
-    if teams && s.teams.is_none() && !s.teams_loader.is_pending() {
-        let Screen::Main { session, .. } = &s.screen else { return };
-        let session = session.clone();
-        s.teams_loader.request((), move |_| teams::teams(&session));
+pub(crate) fn load_teams(s: &mut State) {
+    if s.waker.is_none() || s.teams.is_some() || s.teams_loader.is_pending() { return; }
+    let Screen::Main { session, .. } = &s.screen else { return };
+    let session = session.clone();
+    s.teams_loader.request((), move |_| teams::teams(&session));
+}
+
+/// Reveal a conversation opened outside the current sidebar list.
+pub(crate) fn reveal_conversation(s: &mut State, id: &str) {
+    if let Some(chat) = notifications::conversation(s, id) {
+        let section = if chat.channel { ConversationSection::Teams } else { ConversationSection::Chat };
+        if s.conversation_section != section || !chat.unread {
+            s.unread_only = false;
+        }
+        s.conversation_section = section;
+    }
+    if let Some(Ok(teams)) = &s.teams {
+        for team in teams.iter().filter(|team| team.channels.iter().any(|channel| channel.id == id)) {
+            s.collapsed_teams.remove(&team.id);
+        }
     }
 }
 
 pub(crate) fn open_chat(s: &mut State, id: String) {
     message_state::load_receipts(s, &id);
+    if s.message_search.scope.as_ref().is_some_and(|scope| scope != &id) {
+        s.message_search.close();
+    }
     history::remember_selected(s);
     #[cfg(feature = "image")]
     s.preview_rows.clear();
     s.reply_highlight = None;
     s.reply_target = None;
+    s.search_jump = false;
     s.reply_error = None;
     let Screen::Main { session, .. } = &s.screen else { return };
     let session = session.clone();
@@ -148,21 +152,32 @@ pub(crate) fn open_chat(s: &mut State, id: String) {
     });
 }
 
-/// Reveal the reply target, following older pages until it is found or history runs out.
+/// Reveal a quoted message or a search result, following older pages as needed.
 pub(crate) fn reveal_reply(s: &mut State, tx: &mut Tx) -> bool {
     let Some(target) = s.reply_target.as_deref() else { return false };
+    if s.messages.as_ref().is_some_and(Result::is_err) {
+        s.reply_target = None;
+        s.search_jump = false;
+        return true;
+    }
     let Some(Ok(page)) = &s.messages else { return false };
-    if !target.is_empty() && let Some(msg) = page.msgs.iter().find(|m| m.server_id == target || m.id == target) {
+    let found = (!target.is_empty()).then(|| page.msgs.iter().find(|msg| msg.server_id == target || msg.id == target)).flatten();
+    if let Some(msg) = found.filter(|msg| !s.search_jump || !msg.deleted) {
         tx.scroll_center_in("messages", format!("msg/{}", msg.id));
         s.reply_highlight = Some((msg.id.clone(), std::time::Instant::now()));
         s.reply_highlight_on = true;
         tx.wake_after(std::time::Duration::from_millis(150));
         s.reply_target = None;
+        s.search_jump = false;
         return true;
     }
-    if target.is_empty() || page.older.is_none() {
+    if found.is_some() || target.is_empty() || page.older.is_none() {
         s.reply_target = None;
-        s.reply_error = Some("The quoted message is unavailable or was deleted.".into());
+        s.reply_error = Some(if std::mem::take(&mut s.search_jump) {
+            "This search result is unavailable or was deleted."
+        } else {
+            "The quoted message is unavailable or was deleted."
+        }.into());
         return true;
     }
     load_older(s);
@@ -222,7 +237,7 @@ pub(crate) fn send(s: &mut State) {
         }
     } else if let Some(Ok(page)) = &mut s.messages {
         // In this input's commit, so it glides in; the reload's copy shares its id and key.
-        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), sender_id: q.sender_id.clone(), time: q.time.clone(), text: q.text.clone() }), images: local, links, files, raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: mentions.clone() });
+        page.msgs.push(Msg { id: msg_id.clone(), server_id: String::new(), sender: session.user.name.clone(), sender_id: session.user.id.clone(), text: text.clone(), time: teams::now(), mine: true, reply: replying.as_ref().map(|q| teams::Reply { id: q.server_id.clone(), sender: q.sender.clone(), sender_id: q.sender_id.clone(), time: q.time.clone(), text: q.text.clone() }), thread_root: None, images: local, links, files, raw: String::new(), edited: false, deleted: false, reactions: vec![], mentions: mentions.clone() });
     }
     let draft = s.draft.clone();
     s.draft.clear();
@@ -362,28 +377,9 @@ mod tests {
         assert!(s.reply_target.is_none());
         assert!(s.reply_error.is_some());
         s.reply_target = Some("old-message".into());
-        navigate(&mut s, false);
+        open_chat(&mut s, "other".into());
         assert!(s.reply_highlight.is_none());
         assert!(s.reply_target.is_none());
         assert!(s.reply_error.is_none());
-    }
-
-    #[test]
-    fn navigation_separates_chats_and_channels_without_refetching_loaded_teams() {
-        let mut s = init();
-        demo(&mut s);
-        s.teams = Some(Ok(vec![]));
-        s.draft = TextEdit::new("old chat draft");
-        s.search = TextEdit::new("old search");
-        navigate(&mut s, true);
-        assert!(s.show_teams);
-        assert!(s.selected.is_none());
-        assert!(s.messages.is_none());
-        assert!(s.search.text.is_empty());
-        assert!(s.draft.text.is_empty());
-        assert!(!s.teams_loader.is_pending());
-        navigate(&mut s, false);
-        assert!(!s.show_teams);
-        assert!(s.teams.as_ref().unwrap().as_ref().unwrap().is_empty());
     }
 }
