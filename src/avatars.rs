@@ -57,14 +57,17 @@ fn fresh(path: &Path, now: SystemTime) -> bool {
         .and_then(|t| now.duration_since(t).ok()).is_some_and(|age| age < TTL)
 }
 
+fn decode(bytes: &[u8], cache: &ImageCache) -> Option<Image> {
+    let image = cache.load(bytes);
+    image.wait().ok()?;
+    Some(image)
+}
+
 fn load(s: &Session, id: &str, cache: &ImageCache) -> (Option<Image>, bool) {
     let path = rune::dirs::AppDirs::new("ms-teams-agent")
         .filter(|_| valid_id(&s.user.id))
         .map(|d| d.cache().join("avatars").join(&s.user.id).join(id.replace(':', "_")));
-    let old = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|bytes| {
-        let image = cache.load(bytes);
-        image.wait().ok().map(|_| image)
-    });
+    let old = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|bytes| decode(&bytes, cache));
     if old.is_some() && path.as_ref().is_some_and(|p| fresh(p, SystemTime::now())) {
         return (old, true);
     }
@@ -74,9 +77,8 @@ fn load(s: &Session, id: &str, cache: &ImageCache) -> (Option<Image>, bool) {
             .header("Authorization", &format!("Bearer {}", s.access)).call().ok()?;
         if !res.status().is_success() { return None; }
         let bytes = res.body_mut().with_config().limit(2 * 1024 * 1024).read_to_vec().ok()?;
-        let image = cache.load(bytes.clone());
-        image.wait().ok()?;
-        Some((image, bytes))
+        let photo = decode(&bytes, cache)?;
+        Some((photo, bytes))
     };
     match fetch() {
         Some((image, bytes)) => {

@@ -196,6 +196,7 @@ fn sort_hits(hits: &mut [Hit]) {
 }
 
 pub(crate) fn open_scoped(s: &mut State, tx: &mut Tx) -> bool {
+    if s.conversation_section == ConversationSection::Analytics { return false; }
     let Some(id) = s.selected.clone() else { return false };
     clear_top(s);
     if s.message_search.scope.as_ref() != Some(&id) {
@@ -465,6 +466,10 @@ pub(crate) fn jump(s: &mut State, tx: &mut Tx, hit: &Hit) {
     if s.selected.as_ref() != Some(&hit.conversation) {
         reveal_conversation(s, &hit.conversation);
         open_chat(s, hit.conversation.clone());
+    } else if s.conversation_section == ConversationSection::Analytics {
+        reveal_conversation(s, &hit.conversation);
+        s.restore_scroll = None;
+        notifications::mark_selected_read(s);
     }
     s.reply_error = None;
     s.reply_target = Some(hit.id.clone());

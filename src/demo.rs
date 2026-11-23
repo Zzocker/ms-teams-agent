@@ -25,6 +25,30 @@ pub(crate) fn demo(s: &mut State) {
     ] }));
 }
 
+fn insights_demo(s: &mut State) {
+    use chrono::{Local, NaiveDate, TimeZone};
+
+    demo(s);
+    s.conversation_section = ConversationSection::Analytics;
+    if let Screen::Main { chats, .. } = &mut s.screen {
+        chats[1].avatar_members.retain(|member| member.name != "Ada Lovelace");
+        chats.push(Chat {
+            id: "d".into(), title: "Release planning".into(), unread: false,
+            ..chats[1].clone()
+        });
+        chats.swap(2, 3);
+    }
+    let today = NaiveDate::from_ymd_opt(2026, 11, 14).unwrap();
+    let events = [("a", 54, 19, 10), ("b", 121, 51, 14), ("c", 36, 11, 9), ("d", 82, 28, 16)]
+        .into_iter().flat_map(|(id, total, sent, hour)| (0..total).map(move |i| {
+            let date = today - chrono::Days::new((i % 7) as u64);
+            let time = Local.from_local_datetime(&date.and_hms_opt(hour + i % 2, i % 60, 0).unwrap())
+                .earliest().unwrap();
+            (id, time, i < sent)
+        }));
+    crate::insights::demo(s, today, events);
+}
+
 #[cfg(feature = "image")]
 pub(crate) const IMAGE_DEMO: &str = "https://in-prod.asyncgw.teams.microsoft.com/v1/objects/0-demo/views/imgo";
 
@@ -64,6 +88,7 @@ pub(crate) const SCENES: &[(&str, fn(&mut State))] = &[
     ("error", |s| s.screen = Screen::Login(Some("chat service 403: Forbidden".into()))),
     ("code", |s| s.screen = Screen::Code { user_code: "ABCD1234".into(), url: "https://microsoft.com/devicelogin".into() }),
     ("main", demo),
+    ("analytics", insights_demo),
     ("mentions", mention_demo),
     ("conversation-empty", |s| { demo(s); s.selected = None; s.messages = None; }),
     ("conversation-error", |s| { demo(s); s.messages = Some(Err("Check your connection and try again.".into())); }),

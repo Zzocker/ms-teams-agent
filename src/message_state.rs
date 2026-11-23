@@ -124,6 +124,7 @@ pub(crate) fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     if let Some((id, result)) = s.message_state.restorer.take() {
         history::invalidate(s, &id);
+        if result.is_ok() { insights::invalidate(s, &id); }
         match result {
             Ok(fresh) if s.selected.as_ref() == Some(&id) => {
                 s.loader.cancel();

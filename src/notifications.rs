@@ -81,7 +81,8 @@ fn open_notification(s: &mut State, attempt: u64, id: &str, token: Option<&str>)
 pub fn chat_open(s: &State, id: &str) -> bool {
     #[cfg(feature = "call-audio")]
     if s.calling.expanded { return false; }
-    s.window_focused && s.window_visible && s.selected.as_deref() == Some(id)
+    s.conversation_section != ConversationSection::Analytics
+        && s.window_focused && s.window_visible && s.selected.as_deref() == Some(id)
 }
 
 pub(crate) fn conversation<'a>(s: &'a State, id: &str) -> Option<&'a Chat> {
@@ -166,6 +167,7 @@ fn reconcile(s: &mut State, fresh: Vec<Chat>) {
     s.prefetch_queue = fresh.iter().filter(|c| !c.channel).take(10).map(|c| c.id.clone()).collect();
     let selected = s.selected.clone();
     let mut notices = Vec::new();
+    let mut updated = Vec::new();
     let mut reload = false;
     for mut chat in fresh {
         s.live_baseline.insert(chat.id.clone(), chat.time.clone());
@@ -179,7 +181,10 @@ fn reconcile(s: &mut State, fresh: Vec<Chat>) {
             chat.title = old.title.clone();
             if chat.avatar_id.is_empty() { chat.avatar_id.clone_from(&old.avatar_id); }
             chat.avatar_members = old.avatar_members.clone();
-            if arrived && chat.unread { notices.push(chat.clone()); }
+            if arrived {
+                if chat.unread { notices.push(chat.clone()); }
+                updated.push(chat.id.clone());
+            }
             reload |= arrived && selected.as_ref() == Some(&chat.id);
             chats[index] = chat;
         } else {
@@ -191,6 +196,7 @@ fn reconcile(s: &mut State, fresh: Vec<Chat>) {
     for chat in notices {
         if !chat_open(s, &chat.id) { notify(s, &chat); }
     }
+    for id in updated { insights::invalidate(s, &id); }
     if reload { refresh_selected(s); }
 }
 
@@ -249,6 +255,7 @@ fn receive(s: &mut State, mut chat: Chat, message: Option<Msg>, server_id: &str,
         }
         if open && new { mark_selected_read(s); }
     }
+    insights::invalidate(s, &chat.id);
     if arrived && !open { notify(s, &chat); }
 }
 
