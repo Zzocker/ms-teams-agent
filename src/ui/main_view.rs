@@ -6,9 +6,15 @@ use crate::*;
 pub(crate) enum ConversationSection {
     Chat,
     Teams,
+    Analytics,
 }
 
 const RAIL_WIDTH: f32 = 60.0;
+
+static ANALYTICS_ICON: rune::Icon = rune::Icon {
+    name: "nav-analytics", view: 24.0,
+    body: r#"<path d="M4 4v16h16M8 15v-3m5 3V9m5 6V5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
 
 static CHAT_ICON: rune::Icon = rune::Icon {
     name: "nav-chat", view: 24.0,
@@ -43,9 +49,12 @@ static STAR_FILLED: rune::Icon = rune::Icon {
 
 fn select_conversation(s: &mut State, id: &str) {
     message_search::clear_top(s);
+    let leaving_analytics = s.conversation_section == ConversationSection::Analytics;
     reveal_conversation(s, id);
     if s.selected.as_deref() != Some(id) {
         open_chat(s, id.to_owned());
+    } else if leaving_analytics {
+        notifications::mark_selected_read(s);
     }
 }
 
@@ -56,8 +65,9 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
     let sidebar_surface = rune::oklch(if dark() { 0.255 } else { 0.975 }, 0.009, 266.0);
     let note = |s: &str| text(s).font(type_::BODY).color(t.text_secondary);
 
+    let show_analytics = s.conversation_section == ConversationSection::Analytics;
     let show_teams = s.conversation_section == ConversationSection::Teams;
-    let matches_filter = |chat: &Chat| chat.channel == show_teams && (!s.unread_only || chat.unread);
+    let matches_filter = |chat: &Chat| !show_analytics && chat.channel == show_teams && (!s.unread_only || chat.unread);
     let is_favorite = |id: &str| s.favorites.get(&session.user.id).is_some_and(|ids| ids.contains(id));
     let teams = s.teams.as_ref().and_then(|result| result.as_ref().ok());
     let team_channels: Vec<_> = teams.into_iter().flatten().flat_map(|team|
@@ -165,7 +175,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
             rows.extend(channel_rows);
         }
     }
-    if !has_matches {
+    if !show_analytics && !has_matches {
         rows.push(note(match (show_teams, s.unread_only) {
             (false, false) => "No chats yet.",
             (true, false) => "No channels yet.",
@@ -209,28 +219,29 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
     }).unwrap_or(230.0);
     let compact_search = cx.layout_with("workspace", |rect| rect[2] < 700.0).unwrap_or(false);
     let search_occupies_sidebar = scoped_search_open && available_sidebar_width < 172.0;
-    let show_sidebar = !s.sidebar_hidden && !search_occupies_sidebar;
-    let show_conversations = !show_sidebar || s.panel_width == 0.0;
-    let toggle_sidebar = if show_conversations { "Show conversations" } else { "Hide conversations" };
+    let show_sidebar = !show_analytics && !s.sidebar_hidden && !search_occupies_sidebar;
+    let sidebar_closed = !show_sidebar || s.panel_width == 0.0;
+    let toggle_sidebar = if sidebar_closed { "Show conversations" } else { "Hide conversations" };
     let search = row().w_full().gap(12.0).items_center().px(16.0).py(8.0).fill(t.card)
         .border_sides([0.0, 0.0, 1.0, 0.0], t.separator)
         .child(row().w(164.0).min_w(164.0).grow(1.0).gap(8.0).items_center()
-            .child(el().key("toggle-sidebar").size(36.0, 36.0).center().radius(7.0)
+            .pl(if show_analytics { 44.0 } else { 0.0 })
+            .children((!show_analytics).then(|| el().key("toggle-sidebar").size(36.0, 36.0).center().radius(7.0)
                 .role("button").label(toggle_sidebar).help(toggle_sidebar).focusable(true)
                 .hover(t.hover).cursor(rune::Cursor::Pointer)
                 .on_press(move |s: &mut State| {
                     if search_occupies_sidebar { s.message_search.close(); }
                     if s.panel_width == 0.0 { s.panel_width = settings::DEFAULT_PANEL_WIDTH; }
-                    s.sidebar_hidden = !show_conversations;
+                    s.sidebar_hidden = !sidebar_closed;
                 })
-                .child(rune::icon(&SIDEBAR_ICON, 20.0).color(t.text_secondary)))
+                .child(rune::icon(&SIDEBAR_ICON, 20.0).color(t.text_secondary))))
             .child(text("Teams Agent").font(rune::TextStyle::new(16.0, 700.0)).color(t.text)))
         .child(row().key("search-box").items_center().gap(8.0).w_full().max_w(540.0).min_w(0.0).shrink().min_h(36.0)
             .px(10.0).py(5.0).radius(8.0).fill(t.bg).border(1.0, t.separator)
             .child(rune::icon(&SEARCH_ICON, 17.0).color(t.text_secondary))
             .child(text_input(&s.search, type_::BODY).key("search").grow(1.0).min_w(0.0)
                 .label("Search messages, chats, and channels").color(t.text)
-                .placeholder("Search messages, chats, and channels", t.text_secondary)
+                .placeholder(if compact_search { "Search Teams" } else { "Search messages, chats, and channels" }, t.text_secondary)
                 .caret(t.text, brand.alpha(0.3))
                 .on_edit(|s: &mut State| &mut s.search)
                 .on_input_change(message_search::preview_changed)
@@ -314,7 +325,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
         .child(el().w(1.0).h_full().fill(t.separator));
 
     let is_channel = active.is_some_and(|(chat, _)| chat.channel);
-    let header = s.selected.as_ref().map(|id| {
+    let header = s.selected.as_ref().filter(|_| !show_analytics).map(|id| {
         let favorite_id = id.clone();
         let favorite = is_favorite(id);
         let favorite_label = if favorite { "Remove from Favorites" } else { "Add to Favorites" };
@@ -359,6 +370,7 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
     let rail = col().key("navigation").role("navigation").label("Workspace").w(RAIL_WIDTH).h_full()
         .gap(6.0).px(4.0).py(8.0).fill(t.card).border_sides([0.0, 1.0, 0.0, 0.0], t.separator)
         .children([
+            (ConversationSection::Analytics, "Insights", "nav-analytics", &ANALYTICS_ICON),
             (ConversationSection::Chat, "Chat", "nav-chat", &CHAT_ICON),
             (ConversationSection::Teams, "Teams", "nav-teams", &TEAMS_ICON),
         ].into_iter().map(|(section, label, key, icon)| {
@@ -369,22 +381,39 @@ pub(crate) fn main_view(s: &State, session: &Session, chats: &[Chat], cx: &Cx<St
                 .hover(t.hover).cursor(rune::Cursor::Pointer)
                 .on_press_tx(move |s: &mut State, tx| {
                     if s.conversation_section != section {
+                        let leaving_analytics = s.conversation_section == ConversationSection::Analytics;
+                        if section == ConversationSection::Analytics {
+                            if s.selected.is_some() && s.restore_scroll.is_none() {
+                                s.restore_scroll = Some(s.msg_bar.position());
+                            }
+                            s.message_search.close();
+                            crate::insights::open(s);
+                        }
                         s.conversation_section = section;
-                        s.unread_only = false;
-                        tx.scroll_to_instant("chats", 0.0, 0.0);
+                        if section != ConversationSection::Analytics {
+                            s.unread_only = false;
+                            tx.scroll_to_instant("chats", 0.0, 0.0);
+                            if leaving_analytics { notifications::mark_selected_read(s); }
+                        }
                     }
-                    s.sidebar_hidden = false;
-                    if s.panel_width == 0.0 { s.panel_width = settings::DEFAULT_PANEL_WIDTH; }
+                    if section != ConversationSection::Analytics {
+                        s.sidebar_hidden = false;
+                        if s.panel_width == 0.0 { s.panel_width = settings::DEFAULT_PANEL_WIDTH; }
+                    }
                 })
                 .child(rune::icon(icon, 21.0).color(color))
                 .child(text(label).font(rune::TextStyle::new(11.0, 600.0)).color(color))
         }));
-    let pane = conversation_pane(s, session, is_channel, brand, selected);
     let body = row().key("workspace").w_full().grow(1.0).min_h(0.0).child(rail)
         .children((show_sidebar && sidebar_width > 0.0).then_some(sidebar))
         .children(show_sidebar.then_some(divider))
         .children((!scoped_search_open || !compact_search).then(|| {
-            col().grow(1.0).shrink().min_w(0.0).min_h(0.0).h_full().children(header).child(pane)
+            let content = col().grow(1.0).shrink().min_w(0.0).min_h(0.0).h_full();
+            if show_analytics {
+                content.child(super::insights::pane(s, session, chats, cx))
+            } else {
+                content.children(header).child(conversation_pane(s, session, is_channel, brand, selected))
+            }
         }))
         .children(scoped_search_open.then(|| {
             super::search::panel(s, &conversations, compact_search, brand)
@@ -1321,6 +1350,47 @@ mod tests {
         assert!(rt.state.search.text.is_empty());
         assert!(rt.state.draft.text.is_empty());
         assert!(rt.find("conversation-header").is_some());
+    }
+
+    #[test]
+    fn analytics_opens_directly_and_restores_chat() {
+        let mut s = init();
+        demo(&mut s);
+        s.draft.replace_text("Still writing");
+        s.window_focused = true;
+        let mut rt = rune::Runtime::new(s, view, (640.0, 400.0), rune::Env::new(false, 1.0));
+        let settle = |rt: &mut rune::Runtime<State>| for _ in 0..60 { rt.frame(1.0 / 60.0); };
+        let click = |rt: &mut rune::Runtime<State>, key| {
+            let (x, y) = rt.find(key).unwrap();
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            settle(rt);
+        };
+        settle(&mut rt);
+        assert!(rt.find("nav-analytics").unwrap().1 < rt.find("nav-chat").unwrap().1);
+        click(&mut rt, "nav-analytics");
+        assert!(rt.find("analytics-pane").is_some());
+        assert!(rt.find("conversation-header").is_none());
+        assert!(rt.find("sidebar").is_none());
+        assert!(rt.find("toggle-sidebar").is_none());
+        assert!(!notifications::chat_open(&rt.state, "a"));
+
+        click(&mut rt, "nav-chat");
+        assert!(rt.find("conversation-header").is_some());
+        assert_eq!(rt.state.draft.text, "Still writing");
+        assert!(notifications::chat_open(&rt.state, "a"));
+        click(&mut rt, "nav-analytics");
+        assert!(rt.find("analytics-pane").is_some());
+
+        rt.update(|s, tx| {
+            s.search.replace_text("bernoulli");
+            message_search::open_global(s, tx);
+        });
+        settle(&mut rt);
+        click(&mut rt, "message-hit/a/2026-11-14T10:24:00Z");
+        assert!(rt.find("conversation-header").is_some());
+        assert_eq!(rt.state.reply_highlight.as_ref().unwrap().0, "2026-11-14T10:24:00Z");
+        assert_eq!(rt.state.draft.text, "Still writing");
     }
 
     #[test]

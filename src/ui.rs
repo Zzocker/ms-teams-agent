@@ -3,6 +3,7 @@
 #[cfg(feature = "call-audio")]
 pub(crate) mod call;
 mod composer;
+pub(crate) mod insights;
 mod mentions;
 mod main_view;
 mod media;

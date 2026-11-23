@@ -47,7 +47,7 @@ pub fn peer<'a>(chat_id: &'a str, me: &str) -> Option<&'a str> {
 }
 
 /// The chat with yourself, which Teams shows as "Name (You)".
-pub(super) const NOTES: &str = "48:notes";
+pub(crate) const NOTES: &str = "48:notes";
 /// A chat with no topic and nobody else's last message to name it after.
 pub(super) const UNTITLED: &str = "Chat";
 
